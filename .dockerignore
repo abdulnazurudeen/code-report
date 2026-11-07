@@ -1,0 +1,11 @@
+.git
+.github_token
+.env
+*.db
+*.db-*
+data/
+bundles/
+evals/
+tests/
+__pycache__/
+.claude/

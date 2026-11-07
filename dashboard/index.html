@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Review Audit</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --panel-2:#f1f3f6; --border:#e2e5ea; --text:#1b1f24; --muted:#5d6672;
+  --accent:#2f5bd3; --accent-soft:#e7edfb;
+  --good:#1f8a4c; --good-soft:#e3f4ea; --ok:#a86a00; --ok-soft:#fbf0d9; --bad:#c23934; --bad-soft:#fbe5e4;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#0f1216; --panel:#171b21; --panel-2:#1e232b; --border:#2a313b; --text:#e6e9ee; --muted:#98a2b0;
+    --accent:#7aa2ff; --accent-soft:#1f2a44; --good:#4cc283; --good-soft:#163024; --ok:#e3b04b; --ok-soft:#33290f;
+    --bad:#f07570; --bad-soft:#3a1c1b; --shadow:none;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0 12px 0 0;font-weight:650}
+header .meta{margin-left:auto;color:var(--muted);font-size:12px}
+select,input{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 9px}
+button{font:inherit;cursor:pointer;border:1px solid var(--border);background:var(--panel);color:var(--text);border-radius:8px;padding:6px 11px}
+button:hover{background:var(--panel-2)}
+.layout{display:grid;grid-template-columns:280px 1fr;min-height:calc(100vh - 57px)}
+aside{border-right:1px solid var(--border);background:var(--panel);padding:12px;overflow:auto;max-height:calc(100vh - 57px);position:sticky;top:57px}
+aside input{width:100%;margin-bottom:10px}
+.u{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px;cursor:pointer}
+.u:hover{background:var(--panel-2)} .u.sel{background:var(--accent-soft)}
+.av{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:650;font-size:12px;background:var(--accent-soft);color:var(--accent);flex:none}
+.av.lg{width:52px;height:52px;font-size:18px}
+.u .nm{flex:1;min-width:0} .u .nm b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.u .nm span{color:var(--muted);font-size:12px}
+main{padding:20px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:16px;margin-bottom:16px}
+.card h3{margin:0 0 12px;font-size:14px;font-weight:650}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow)}
+.kpi .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums} .kpi .l{color:var(--muted);font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;cursor:pointer;white-space:nowrap;user-select:none}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer} tr.click:hover td{background:var(--panel-2)}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+.s-good{background:var(--good-soft);color:var(--good)} .s-ok{background:var(--ok-soft);color:var(--ok)}
+.s-bad{background:var(--bad-soft);color:var(--bad)} .s-na{background:var(--panel-2);color:var(--muted)}
+.bar{display:grid;grid-template-columns:150px 1fr 40px;align-items:center;gap:10px;margin:8px 0}
+.bar .t{height:10px;background:var(--panel-2);border-radius:6px;overflow:hidden}
+.bar .t i{display:block;height:100%;border-radius:6px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:12px}
+.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:8px 12px;color:var(--muted)}
+.tabs button.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.muted{color:var(--muted)} .small{font-size:12px}
+.empty{padding:40px;text-align:center;color:var(--muted)}
+#drawer{position:fixed;inset:0 0 0 auto;width:min(760px,100%);background:var(--panel);border-left:1px solid var(--border);box-shadow:-8px 0 24px rgba(0,0,0,.15);transform:translateX(100%);visibility:hidden;transition:transform .2s,visibility .2s;overflow:auto;z-index:10;padding:20px}
+#drawer.open{transform:none;visibility:visible}
+#scrim{position:fixed;inset:0;background:rgba(0,0,0,.25);display:none;z-index:9} #scrim.open{display:block}
+.thread{border:1px solid var(--border);border-radius:10px;margin:10px 0;overflow:hidden}
+.thread .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;background:var(--panel-2);font-size:12px}
+.cm{padding:8px 10px;border-top:1px solid var(--border)} .cm b{font-size:12px}
+.cm p{margin:4px 0 0;white-space:pre-wrap;word-break:break-word}
+.issue{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border)}
+.issue>.badge,.issue>code{flex:none;margin-top:2px}
+td.nw{white-space:nowrap}
+ul.tp{margin:0;padding-left:18px} ul.tp li{margin:4px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-2);padding:1px 5px;border-radius:5px}
+pre.std{white-space:pre-wrap;font-size:12.5px}
+svg text{fill:var(--muted);font-size:11px}
+@media (max-width:900px){.layout{grid-template-columns:1fr} aside{position:static;max-height:none;border-right:none;border-bottom:1px solid var(--border)} .grid2{grid-template-columns:1fr} header .meta{margin-left:0}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Code Review Audit</h1>
+  <select id="period" aria-label="Period">
+    <option value="1">Last 1 month</option><option value="3" selected>Last 3 months</option>
+    <option value="6">Last 6 months</option><option value="12">Last 12 months</option>
+    <option value="all">All time</option><option value="custom">Custom…</option>
+  </select>
+  <span id="custom" style="display:none"><input type="date" id="since"> – <input type="date" id="until"></span>
+  <select id="repo" aria-label="Project"><option value="">All projects</option></select>
+  <button id="teamBtn">Team overview</button>
+  <button id="stdBtn">Standards</button>
+  <span class="meta" id="meta"></span>
+</header>
+<div class="layout">
+  <aside><input id="q" placeholder="Search people…" aria-label="Search people"><div id="users"></div></aside>
+  <main id="main"></main>
+</div>
+<div id="scrim"></div><div id="drawer"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = v => v == null ? "–" : (+v).toFixed(1);
+const cls = v => v == null ? "s-na" : v >= 4 ? "s-good" : v >= 3 ? "s-ok" : "s-bad";
+const badge = v => `<span class="badge ${cls(v)}">${fmt(v)}</span>`;
+const d10 = s => s ? s.slice(0,10) : "–";
+const initials = u => (u.name || u.login || "?").replace(/[^A-Za-z ]/g," ").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase() || "?";
+const label = u => u.login || u.name || u.uid;
+const S = {team: [], user: null, sort: {key: "prs", dir: -1}, tab: "prs"};
+
+function range(){
+  const p = $("#period").value, today = new Date().toISOString().slice(0,10);
+  if (p === "all") return {since: "0000-01-01", until: "9999-12-31"};
+  if (p === "custom") return {since: $("#since").value || "0000-01-01", until: $("#until").value || today};
+  const d = new Date(); d.setMonth(d.getMonth() - +p);
+  return {since: d.toISOString().slice(0,10), until: today};
+}
+function qs(){ const r = range(); return `since=${r.since}&until=${r.until}&repo=${encodeURIComponent($("#repo").value)}`; }
+// location.origin never carries user:password, so fetch works however the page was opened; the browser
+// re-sends the Basic login it already has for this origin
+const api = p => fetch(location.origin + p, {credentials: "same-origin"}).then(r => r.ok ? r.json() : null);
+
+async function boot(){
+  const m = await api("/api/meta");
+  for (const r of m.repos) $("#repo").insertAdjacentHTML("beforeend", `<option>${esc(r)}</option>`);
+  $("#meta").textContent = `Data ${m.first ? d10(m.first)+" → "+d10(m.last) : "empty"} · last sync ${m.last_run ? d10(m.last_run) : "never"} · ${m.pending_eval} PRs awaiting evaluation · rubric ${m.rubric_version}${m.engines&&m.engines.heuristic?` · ${m.engines.heuristic} rule-based estimates`:""}`;
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get("user")) S.user = h.get("user");
+  refresh();
+}
+async function refresh(){
+  S.team = await api(`/api/team?${qs()}`) || [];
+  renderUsers();
+  S.user ? showUser(S.user) : showTeam();
+}
+function renderUsers(){
+  const q = $("#q").value.toLowerCase();
+  const list = S.team.filter(u => !q || (label(u)+" "+(u.name||"")).toLowerCase().includes(q));
+  $("#users").innerHTML = list.map(u => `
+    <div class="u ${u.uid===S.user?"sel":""}" data-uid="${esc(u.uid)}">
+      <div class="av">${esc(initials(u))}</div>
+      <div class="nm"><b>${esc(label(u))}</b><span>${u.prs ? `${u.prs} PR${u.prs===1?"":"s"} · ${u.repos||0} project${u.repos===1?"":"s"}` : u.contributed ? `commits in ${u.contributed} shared PR${u.contributed===1?"":"s"}` : `reviews/commits only`}</span></div>
+      ${badge(u.overall)}
+    </div>`).join("") || `<div class="empty small">No activity in this period</div>`;
+  document.querySelectorAll(".u").forEach(el => el.onclick = () => { S.user = el.dataset.uid; location.hash = "user="+encodeURIComponent(S.user); renderUsers(); showUser(S.user); });
+}
+
+function sortRows(rows, key, dir){ return [...rows].sort((a,b) => ((a[key] ?? -1) > (b[key] ?? -1) ? 1 : (a[key] ?? -1) < (b[key] ?? -1) ? -1 : 0) * dir); }
+function table(cols, rows, onClick){
+  const head = cols.map(c => `<th class="${c.n?"n":""}" data-k="${c.k}">${c.t}${S.sort.key===c.k?(S.sort.dir>0?" ▲":" ▼"):""}</th>`).join("");
+  const body = rows.map((r,i) => `<tr class="${onClick?"click":""}" data-i="${i}">${cols.map(c => `<td class="${c.n?"n":""}${c.nw?" nw":""}">${c.f ? c.f(r) : esc(r[c.k] ?? "–")}</td>`).join("")}</tr>`).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+function wire(container, rows, onClick, rerender){
+  container.querySelectorAll("th").forEach(th => th.onclick = () => { const k = th.dataset.k; S.sort = {key:k, dir: S.sort.key===k ? -S.sort.dir : -1}; rerender(); });
+  if (onClick) container.querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => onClick(rows[+tr.dataset.i]));
+}
+
+function showTeam(){
+  S.user = null; history.replaceState(null, "", location.pathname); renderUsers();
+  const cols = [
+    {k:"login", t:"Person", f:u => `<b>${esc(label(u))}</b>`}, {k:"prs", t:"PRs owned", n:1}, {k:"contributed", t:"Shared PRs", n:1, f:u => u.contributed||0},
+    {k:"commits", t:"Commits", n:1, f:u => u.commits||0}, {k:"repos", t:"Projects", n:1},
+    {k:"overall", t:"Overall", n:1, f:u => badge(u.overall)}, {k:"commit_msg", t:"Commit msgs", n:1, f:u => badge(u.commit_msg)},
+    {k:"code_quality", t:"Code", n:1, f:u => badge(u.code_quality)}, {k:"validation", t:"Validation", n:1, f:u => badge(u.validation)},
+    {k:"review_response", t:"Review resp.", n:1, f:u => badge(u.review_response)},
+    {k:"reworked", t:"Reworked", n:1, f:u => u.reworked||0}, {k:"ignored_comments", t:"Ignored comments", n:1, f:u => u.ignored_comments||0},
+    {k:"direct_pushes", t:"Direct pushes", n:1, f:u => u.direct_pushes||0}, {k:"reviews_given", t:"Reviews given", n:1, f:u => u.reviews_given||0}];
+  const draw = () => {
+    const rows = sortRows(S.team, S.sort.key, S.sort.dir);
+    $("#main").innerHTML = `<div class="card"><h3>Team overview</h3><div style="overflow:auto">${rows.length ? table(cols, rows, 1) : '<div class="empty">No PRs in this period. Run <code>audit.py collect</code>.</div>'}</div>
+      <p class="small muted">Scores are 1–5 averages of each person's own share of every evaluated PR in the period: the PR owner answers for validation and review response; every committer answers for the commit messages and code quality of their own commits. “Shared PRs” = other people's PRs they committed to. “Reworked” = their PRs later confirmed as fixed or reverted. “Ignored comments” = valid review comments dismissed or left open.</p></div>`;
+    wire($("#main"), rows, u => { S.user = u.uid; location.hash = "user="+encodeURIComponent(u.uid); renderUsers(); showUser(u.uid); }, draw);
+  };
+  draw();
+}
+
+function trendSvg(t){
+  if (!t.length) return `<div class="empty small">No data</div>`;
+  const W = 520, H = 150, pad = 28, bw = Math.min(46, (W - pad*2) / t.length - 10), maxP = Math.max(...t.map(x => x.prs));
+  const x = i => pad + i * ((W - pad*2) / t.length) + 5;
+  const bars = t.map((m,i) => `<rect x="${x(i)}" y="${H-pad-(m.prs/maxP)*(H-pad*2)}" width="${bw}" height="${(m.prs/maxP)*(H-pad*2)}" rx="3" fill="var(--accent-soft)"><title>${m.month}: ${m.prs} PRs</title></rect>
+     <text x="${x(i)+bw/2}" y="${H-pad+14}" text-anchor="middle">${m.month.slice(2)}</text>`).join("");
+  const pts = t.map((m,i) => m.overall == null ? null : [x(i)+bw/2, H-pad-((m.overall-1)/4)*(H-pad*2), m]).filter(Boolean);
+  const line = pts.length > 1 ? `<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts.map(p=>p[0]+","+p[1]).join(" ")}"/>` : "";
+  const dots = pts.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="var(--accent)"><title>${p[2].month}: score ${p[2].overall}</title></circle>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Monthly PRs and score">${bars}${line}${dots}
+    <text x="4" y="${pad}">5</text><text x="4" y="${H-pad}">1</text></svg>
+    <div class="small muted">Bars: PRs per month · Line: average score (1–5)</div>`;
+}
+
+async function showUser(uid){
+  const d = await api(`/api/user/${encodeURIComponent(uid)}?${qs()}`);
+  if (!d) { $("#main").innerHTML = `<div class="empty">User not found</div>`; return; }
+  const s = d.summary || {}, u = d.user;
+  const dims = [["commit_msg","Commit messages"],["code_quality","Code quality"],["validation","Validation & tests"],["review_response","Handling review feedback"]];
+  const kpi = (v,l) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  $("#main").innerHTML = `
+    <div class="card" style="display:flex;gap:14px;align-items:center">
+      <div class="av lg">${esc(initials(u))}</div>
+      <div><div style="font-size:18px;font-weight:700">${esc(u.name || u.login || u.uid)}</div>
+      <div class="small muted">${u.login ? "@"+esc(u.login)+" · " : ""}${d.aliases.map(esc).join(", ")}</div></div>
+      <div style="margin-left:auto;text-align:right"><div class="small muted">Overall score</div><div style="font-size:26px">${badge(s.overall)}</div></div>
+    </div>
+    <div class="kpis">
+      ${kpi(s.prs||0,"PRs owned")}${kpi(s.contributed||0,"Commits in others' PRs")}${kpi(s.commits||0,"Commits authored")}${kpi(s.repos||0,"Projects")}${kpi((s.evaluated||0)+"/"+(s.prs||0),"Owned PRs evaluated")}
+      ${kpi(s.reworked||0,"PRs later fixed/reverted")}${kpi(s.ignored_comments||0,"Valid comments ignored")}
+      ${kpi(s.direct_pushes||0,"Direct pushes")}${kpi(s.reviews_given||0,"Reviews given")}
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Score breakdown</h3>${dims.map(([k,l]) => `<div class="bar"><span>${l}</span><div class="t"><i class="${cls(s[k])}" style="width:${s[k]?(s[k]/5*100):0}%;background:currentColor"></i></div>${badge(s[k])}</div>`).join("")}
+        <div class="small muted" style="margin-top:8px">Weights: commits 15% · code 40% · validation 20% · review response 25%. On others' PRs only commits and code count.</div></div>
+      <div class="card"><h3>Trend</h3>${trendSvg(d.trend)}</div>
+    </div>
+    <div class="card"><h3>Projects worked on</h3><div id="proj"></div></div>
+    <div class="card"><h3>Issues in their own code (${d.my_issues.length})</h3><div id="myi"></div></div>
+    <div class="card">
+      <div class="tabs"><button data-t="prs">Pull requests (${d.prs.length})</button><button data-t="rev">As reviewer (${d.reviews.length})</button><button data-t="dp">Direct pushes (${d.direct_pushes.length})</button></div>
+      <div id="tab" style="overflow:auto"></div>
+    </div>`;
+  $("#myi").innerHTML = d.my_issues.length ? d.my_issues.map(i=>`<div class="issue"><span class="badge ${sevCls[i.severity]||"s-na"}">${esc(i.severity)}</span><div><a href="#" data-pr="${i.pr_id}">${esc(i.repo.split("/")[1])} #${i.number}</a> <code>${esc(i.file)}${i.line?":"+i.line:""}</code>${i.commit_sha?` <code>${esc(String(i.commit_sha).slice(0,8))}</code>`:""} ${esc(i.issue)}</div></div>`).join("") : `<div class="small muted">No issues traced to their commits.</div>`;
+  $("#myi").querySelectorAll("[data-pr]").forEach(a => a.onclick = e => { e.preventDefault(); openPr(a.dataset.pr); });
+  $("#proj").innerHTML = table([{k:"repo",t:"Project"},{k:"prs",t:"PRs owned",n:1},{k:"contributed",t:"Shared PRs",n:1},{k:"merged",t:"Merged",n:1},{k:"overall",t:"Avg score",n:1,f:r=>badge(r.overall)},{k:"reworked",t:"Reworked",n:1},{k:"ignored",t:"Ignored comments",n:1}], d.projects);
+  const tabs = {
+    prs: () => { const cols = [{k:"repo",t:"Project"},{k:"number",t:"PR",f:r=>`#${r.number} ${esc(r.title)}`},{k:"role",t:"Role",f:r=>r.role==="owner"?`<span class="badge s-na">owner</span>`:`<span class="badge s-ok" title="Committed to ${esc(r.owner)}'s PR">${r.my_commits} commit${r.my_commits===1?"":"s"} in ${esc(r.owner)}'s PR</span>`},{k:"state",t:"State",f:r=>`<span class="badge ${r.state==="merged"?"s-good":r.state==="closed"?"s-bad":"s-ok"}">${esc(r.state==="closed"?"closed (not merged)":r.state)}</span>`},{k:"activity_at",t:"Last activity",nw:1,f:r=>d10(r.activity_at)},
+        {k:"reviewers",t:"Reviewed by"},{k:"commit_msg",t:"Commits",n:1,f:r=>badge(r.commit_msg)},{k:"code_quality",t:"Code",n:1,f:r=>badge(r.code_quality)},
+        {k:"validation",t:"Valid.",n:1,f:r=>badge(r.validation)},{k:"review_response",t:"Review resp.",n:1,f:r=>badge(r.review_response)},{k:"overall",t:"Overall",n:1,f:r=>badge(r.overall)},
+        {k:"flags",t:"Flags",f:r=>[r.kind==="promotion"?`<span class="badge s-na" title="Branch promotion (${esc(r.head_branch)} → ${esc(r.base_branch)}): not scored">promotion</span>`:"", r.reworked?`<span class="badge s-bad">reworked</span>`:"", r.ignored?`<span class="badge s-ok">${r.ignored} ignored</span>`:"", r.ci_status==="FAILURE"?`<span class="badge s-bad">CI red</span>`:"", r.needs_split?`<span class="badge s-ok" title="Shared PR scored before per-person scoring; awaiting re-evaluation">split pending</span>`:""].join(" ")}];
+      const draw = () => { const rows = sortRows(d.prs, (d.prs[0] && S.sort.key in d.prs[0]) ? S.sort.key : "activity_at", S.sort.dir); $("#tab").innerHTML = rows.length ? table(cols, rows, 1) : `<div class="empty">No PRs</div>`; wire($("#tab"), rows, r => openPr(r.id), draw); }; draw(); },
+    rev: () => { const cols = [{k:"repo",t:"Project"},{k:"number",t:"PR",f:r=>`#${r.number} ${esc(r.title)}`},{k:"author",t:"Author"},{k:"size",t:"Lines",n:1},{k:"states",t:"Verdict"},
+        {k:"comments",t:"Comments",n:1},{k:"score",t:"Review score",n:1,f:r=>badge(r.score)},{k:"missed",t:"Missed",f:r=>{const m=JSON.parse(r.missed||"[]");return m.length?`<span class="badge s-bad">${m.length} missed</span> <span class="small">${esc(m[0])}</span>`:""}}];
+      const rows = d.reviews; $("#tab").innerHTML = rows.length ? table(cols, rows, 1) : `<div class="empty">No reviews given</div>`; wire($("#tab"), rows, r => openPr(r.pr_id), tabs.rev); },
+    dp: () => { $("#tab").innerHTML = d.direct_pushes.length ? table([{k:"repo",t:"Project"},{k:"sha",t:"Commit",f:r=>`<code>${esc(r.sha.slice(0,8))}</code>`},{k:"authored_at",t:"Date",nw:1,f:r=>d10(r.authored_at)},{k:"message",t:"Message",f:r=>esc(r.message.split("\n")[0])}], d.direct_pushes) : `<div class="empty">No direct pushes to the default branch</div>`; }
+  };
+  const go = t => { S.tab = t; document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.t===t)); tabs[t](); };
+  document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => go(b.dataset.t));
+  go(S.tab);
+}
+
+const sevCls = {blocker:"s-bad", major:"s-bad", minor:"s-ok", nit:"s-na"};
+const valCls = {valid:"s-good", nitpick:"s-na", invalid:"s-bad"};
+const resCls = {fixed_in_code:"s-good", explained:"s-good", dismissed:"s-bad", open:"s-ok"};
+async function openPr(id){
+  const p = await api(`/api/pr/${id}`); if (!p) return;
+  const sc = [["commit_msg","Commits"],["code_quality","Code"],["validation","Validation"],["review_response","Review response"],["overall","Overall"]];
+  $("#drawer").innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:10px"><div>
+      <div class="small muted">${esc(p.repo)} · #${p.number} · by ${esc(p.author_login)}</div>
+      <h2 style="margin:4px 0 8px;font-size:18px">${esc(p.title)}</h2></div><button id="close" aria-label="Close">✕</button></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      <span class="badge ${p.state==="merged"?"s-good":p.state==="closed"?"s-bad":"s-ok"}">${esc(p.state==="closed"?"closed without merge":p.state)}</span><span class="badge ${p.ci_status==="SUCCESS"?"s-good":p.ci_status==="FAILURE"?"s-bad":"s-na"}">CI ${esc(p.ci_status||"unknown")}</span>
+      <span class="badge s-na">+${p.additions} −${p.deletions} · ${p.changed_files} files</span>
+      <span class="badge s-na">created ${d10(p.created_at)}${p.merged_at?" · merged "+d10(p.merged_at)+(p.merged_by?" by "+esc(p.merged_by):""):p.closed_at?" · closed "+d10(p.closed_at):""}</span>
+      <span class="badge ${p.tests_added?"s-good":"s-ok"}">${p.tests_added?"tests added":"no tests added"}</span>
+      <a href="${esc(p.url)}" target="_blank" rel="noopener">Open on GitHub ↗</a></div>
+    ${p.kind==="promotion" ? `<div class="card"><b>Branch promotion</b> (${esc(p.head_branch)} → ${esc(p.base_branch)}). It carries changes already reviewed in their own PRs, so it isn't scored.</div>` : p.overall==null ? `<div class="card"><b>Not evaluated yet</b> for the current code version.</div>` : `
+    <div class="card"><div style="display:flex;gap:14px;flex-wrap:wrap">${sc.map(([k,l])=>`<div><div class="small muted">${l}</div>${badge(p[k])}</div>`).join("")}</div>
+      <p style="margin:12px 0 0">${esc(p.summary)}</p>
+      <p class="small muted" style="margin:8px 0 0">${p.engine==="heuristic"?"⚠ Rule-based estimate (no LLM): code quality reflects pattern checks only, not a reading of the logic.":p.engine==="anthropic-api"?"Scored by Claude via the Anthropic API.":"Scored by Claude (agent review)."}</p></div>
+    ${p.talking_points.length?`<div class="card"><h3>1:1 talking points</h3><ul class="tp">${p.talking_points.map(t=>`<li>${esc(t)}</li>`).join("")}</ul></div>`:""}
+    ${p.people.length>1?`<div class="card"><h3>Who answers for what</h3><div style="overflow:auto">
+      <table><thead><tr><th>Person</th><th>Role</th><th class="n">Commits</th><th class="n">Lines</th><th class="n">Commit msgs</th><th class="n">Code</th><th class="n">Validation</th><th class="n">Review resp.</th><th class="n">Their score</th></tr></thead><tbody>
+      ${p.people.map(x=>`<tr><td><b>${esc(x.login)}</b>${x.notes?`<div class="small muted">${esc(x.notes)}</div>`:""}</td><td>${x.is_owner?"owner":"committer"}</td><td class="n">${x.commits}</td><td class="n nw">+${x.additions} −${x.deletions}</td>
+        <td class="n">${badge(x.commit_msg)}</td><td class="n">${badge(x.code_quality)}</td><td class="n">${x.is_owner?badge(x.validation):"–"}</td><td class="n">${x.is_owner?badge(x.review_response):"–"}</td><td class="n">${x.scored?badge(x.overall):`<span class="badge s-ok">pending</span>`}</td></tr>`).join("")}</tbody></table></div>
+      <div class="small muted" style="margin-top:6px">The owner answers for validation and review response; each committer for the commit messages and code of their own commits. Merge commits don't count.</div></div>`:""}
+    <div class="card"><h3>Commit messages</h3><p class="small">${esc(p.commit_notes)}</p>
+      ${p.commits.map(c=>`<div class="issue"><code>${esc(c.sha.slice(0,8))}</code><span class="small muted">${esc(c.author)}${c.coauthors?" + "+esc(c.coauthors):""}</span><span>${esc(c.message.split("\n")[0])}</span></div>`).join("")}</div>
+    <div class="card"><h3>Code issues found (${p.code_issues.length})</h3>
+      ${p.code_issues.map(i=>`<div class="issue"><span class="badge ${sevCls[i.severity]||"s-na"}">${esc(i.severity)}</span><div><code>${esc(i.file)}${i.line?":"+i.line:""}</code>${i.author?` <span class="badge s-na">${esc(i.author)}</span>`:""} ${esc(i.issue)}
+        <div class="small ${i.caught_by_reviewer?"":"muted"}">${i.caught_by_reviewer?"✓ raised by reviewer":"✗ not raised in review"}</div></div></div>`).join("") || `<div class="small muted">None above nit level.</div>`}
+      ${p.validation_notes?`<p class="small"><b>Validation:</b> ${esc(p.validation_notes)}</p>`:""}</div>`}
+    <div class="card"><h3>Review conversation (${p.threads.length} threads)</h3>
+      ${p.reviews.map(r=>`<div class="small"><b>${esc(r.reviewer)}</b> — ${esc(r.state)} · ${d10(r.submitted_at)}${r.body?": "+esc(r.body):""}</div>`).join("")}
+      ${p.threads.map(t=>`<div class="thread"><div class="hd"><code>${esc(t.path||"")}${t.line?":"+t.line:""}</code>
+          <span class="badge ${t.is_resolved?"s-good":"s-ok"}">${t.is_resolved?"marked resolved":"unresolved"}</span>
+          ${t.eval?`<span class="badge ${valCls[t.eval.validity]}">${esc(t.eval.validity)}</span><span class="badge ${resCls[t.eval.resolution]}">${esc(t.eval.resolution.replace(/_/g," "))}</span>${t.eval.fix_sha?`<code>${esc(t.eval.fix_sha.slice(0,8))}</code>`:""}`:""}</div>
+          ${t.comments.map(c=>`<div class="cm"><b>${esc(c.author)}</b> <span class="small muted">${d10(c.created_at)}</span><p>${esc(c.body)}</p></div>`).join("")}
+          ${t.eval&&t.eval.note?`<div class="cm small"><b>Assessment:</b> ${esc(t.eval.note)}</div>`:""}</div>`).join("") || `<div class="small muted">No inline review comments.</div>`}
+      ${p.conversation.length?`<h3 style="margin-top:14px">PR conversation</h3>`+p.conversation.map(c=>`<div class="cm"><b>${esc(c.author)}</b> <span class="small muted">${d10(c.created_at)}</span><p>${esc(c.body)}</p></div>`).join(""):""}</div>
+    ${p.reviewer_evals.length?`<div class="card"><h3>Reviewer assessment</h3>${p.reviewer_evals.map(r=>`<div class="issue">${badge(r.score)}<div><b>${esc(r.reviewer)}</b> — ${esc(r.notes)}
+      ${r.missed.length?`<div class="small">Missed: ${r.missed.map(esc).join("; ")}</div>`:""}</div></div>`).join("")}</div>`:""}
+    ${(p.fixed_by.length||p.fixes.length)?`<div class="card"><h3>Rework</h3>
+      ${p.fixed_by.map(r=>`<div class="issue"><span class="badge s-bad">${esc(r.kind.replace(/_/g," "))}</span><div>${r.id===p.id ? "Later fixed by a direct commit (no PR)" : `Later fixed by <a href="#" data-pr="${r.id}">#${r.number} ${esc(r.title)}</a> (${esc(r.author)})`}<div class="small muted">${esc(r.evidence||r.reason)}</div></div></div>`).join("")}
+      ${p.fixes.filter(r=>r.id!==p.id).map(r=>`<div class="issue"><span class="badge s-ok">fixes</span><div><a href="#" data-pr="${r.id}">#${r.number} ${esc(r.title)}</a><div class="small muted">${esc(r.evidence)}</div></div></div>`).join("")}</div>`:""}`;
+  $("#drawer").scrollTop = 0;
+  $("#drawer").classList.add("open"); $("#scrim").classList.add("open");
+  $("#close").onclick = closePr;
+  $("#drawer").querySelectorAll("[data-pr]").forEach(a => a.onclick = e => { e.preventDefault(); openPr(a.dataset.pr); });
+}
+function closePr(){ $("#drawer").classList.remove("open"); $("#scrim").classList.remove("open"); }
+$("#scrim").onclick = closePr;
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePr(); });
+$("#period").onchange = () => { $("#custom").style.display = $("#period").value==="custom" ? "" : "none"; refresh(); };
+$("#since").onchange = $("#until").onchange = $("#repo").onchange = refresh;
+$("#q").oninput = renderUsers;
+$("#teamBtn").onclick = () => showTeam();
+$("#stdBtn").onclick = async () => {
+  const t = await fetch(location.origin + "/api/standards", {credentials: "same-origin"}).then(r => r.text());
+  $("#drawer").innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Review standards</h2><button id="close">✕</button></div><pre class="std">${esc(t)}</pre>`;
+  $("#drawer").classList.add("open"); $("#scrim").classList.add("open"); $("#close").onclick = closePr;
+};
+boot();
+</script>
+</body>
+</html>

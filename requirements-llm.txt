@@ -1,0 +1,2 @@
+# Only needed for `audit.py score --engine anthropic`. Everything else uses the Python standard library.
+anthropic>=1.0

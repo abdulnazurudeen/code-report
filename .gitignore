@@ -1,0 +1,17 @@
+# secrets
+.github_token
+.env
+
+# data - contains people's scores and security findings; never commit it, ship it to the host separately
+*.db
+*.db-*
+*.db-journal
+data/
+backups/
+
+# scoring working files
+bundles/
+evals/
+
+__pycache__/
+.claude/settings.local.json
