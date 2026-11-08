@@ -1,250 +1,237 @@
 # PR & Code-Review Audit
 
-A self-contained web app. An admin picks repos and a period in the UI; the app pulls PRs, commits, reviews and review
-threads from GitHub into **SQLite (`audit.db`)** with plain code, then scores every PR with an LLM following **our own
-scoring skill** (`skills/pr-scoring/`, editable, with per-case model routing), and shows everything in a role-based
-**dashboard** (admin / viewer / self). Viewing and rule-based scoring need only Python 3.9+; LLM scoring needs the
-`anthropic` package and an API key.
+A web app that answers: **how good are our pull requests and code reviews, per person and per project?**
+
+1. It **collects** pull requests, commits and review comments from GitHub (plain code, no AI, read-only).
+2. It **scores** each pull request (PR) with an AI model that follows written instructions you can edit.
+3. It **shows** everything on a dashboard: scores per person, per project, issues found, 1:1 talking points.
+
+Who sees what: **admins** run and configure everything, **viewers** (e.g. the office TV) see everyone read-only, and
+**each developer** can sign in with GitHub and see only their own results.
+
+> **Never been here before?** Read sections 1 to 3. Sections 4 onwards are for later.
 
 ---
 
-## Run the dashboard (Windows)
+## 1. Start it on your computer (10 minutes)
 
-**Easiest:** double-click **`run_dashboard.bat`** in this folder.
-It starts the dashboard and opens **http://127.0.0.1:8765** in your browser. Keep the black window open while you use it; close it to stop.
+1. **Install Python 3.9 or newer** from https://www.python.org/downloads/ (tick *Add python.exe to PATH*).
+2. **Only if you want AI scoring:** open a terminal in this folder and run `pip install -r requirements-llm.txt`.
+3. **Create your settings file.** Copy `.env.example` to `.env` and fill in the lines marked in section 2.
+   (`.env` stays on your computer; it is never committed.)
+4. **Start it:** double-click **`run_dashboard.bat`**, or run `py audit.py serve --open`.
+   Your browser opens **http://127.0.0.1:8765**. Keep the black window open; close it to stop.
+5. **Load data:** click **Run** in the top bar and follow section 3.
 
-**From a terminal** (Command Prompt or PowerShell):
+On your own computer there is no login: the app only answers on `127.0.0.1`, and you are an admin.
 
-```bat
-cd C:\Users\Nazurudeen\projects\pr-review
-py audit.py serve --open
-```
+## 2. The settings file (`.env`)
 
-(If `py` isn't found, use `python` instead. Use `--port 9000` if 8765 is busy.)
+Only these matter to begin with:
 
-**First time only — install Python:** download from https://www.python.org/downloads/ and tick
-**“Add python.exe to PATH”** during setup.
+| Line | What it is | Where to get it |
+|---|---|---|
+| `GITHUB_ORG` | Your organisation name, the `xyz` in `github.com/xyz` | your GitHub URL |
+| `GITHUB_TOKEN` | A **read-only** key so the app can read your PRs. Locally you can instead put the token alone in a file named `.github_token` | GitHub → Settings → Developer settings → Fine-grained tokens. Resource owner: your org. Repository permissions, all *Read-only*: Contents, Pull requests, Metadata (and Commit statuses). If the org asks for approval, an owner approves it under Organization → Settings → Personal access tokens |
+| `ANTHROPIC_API_KEY` | The key for AI scoring (**costs money per PR**). Not needed to collect data or for the free rule-based scoring | https://console.anthropic.com → API keys |
+| `AUTO_REFRESH_HOURS` | Optional: keep the data up to date by itself (section 4) | e.g. `6` |
 
-### Using the dashboard
+The app never shows these keys; the **Access** tab only says *set* or *not set*. The full list, with comments, is in
+`.env.example`. Sign-in settings (GitHub OAuth, admins, TV password) are only needed on a shared server (section 5).
+
+## 3. A tour of the screens
+
+### Dashboard (what everyone sees)
 
 | Where | What you get |
 |---|---|
-| **Top bar** | Period (1 / 3 / 6 / 12 months, all, custom dates) and project filter. All numbers update instantly. |
-| **Left list** | Every person found in the repos, with PR count and overall score. Search by name. |
-| **Team overview** | One row per person — scores per area, reworked PRs, ignored review comments, direct pushes, reviews given. Click a column to sort, a row to open the person. |
-| **Person page** | Overall score, score per area, monthly trend, projects worked on, and tabs for **Pull requests**, **As reviewer**, **Direct pushes**. |
-| **Click a PR** | 1:1 talking points, commit messages, code issues found (and whether the reviewer caught them), full review conversation with each comment marked *valid / nitpick / invalid* and *fixed / explained / dismissed / open*, reviewer assessment, and links to later fixes or reverts. |
-| **Standards** | The rubric every PR is scored against. |
+| **Top bar** | Period (1 / 3 / 6 / 12 months, all, custom) and project filter. Numbers update instantly. |
+| **Left list** | Every person found in the repos, with PR count and overall score. |
+| **Team overview** | One row per person: scores per area, reworked PRs, ignored review comments, direct pushes, reviews given. Click a column to sort, a row to open the person. |
+| **Person page** | Overall score, score per area, monthly trend, projects, tabs for **Pull requests**, **As reviewer**, **Direct pushes**. |
+| **Click a PR** | 1:1 talking points, commit messages, code issues (and whether the reviewer caught them), the review conversation with each comment marked valid / nitpick / invalid and fixed / dismissed / open, and which model scored it. |
+| **Standards** | The rules every PR is scored against, shown as a readable page. |
 
-Score colours: **green ≥ 4**, **amber 3–4**, **red < 3** (scale 1–5).
-The dashboard only reads `audit.db`; it is safe to open while Claude is updating data (refresh the page to see new results).
+Scores are 1 to 5: **green 4 or more**, **amber 3 to 4**, **red below 3**.
 
----
+### Run (admins): load or update data
 
-## Updating the data
+1. **Pick repositories** from your organisation (use the filter box), or tick *use every repo of the organisation*.
+2. **Choose the period** (how far back) and **what to do**:
+   - *Pull from GitHub*: collects PRs, commits and reviews. Free, no AI.
+   - *Scoring*: **LLM with our skill** (costs money), **Rule-based** (free, rough), or **Don't score** (collect only).
+3. Press **Estimate cost**. It shows how many PRs would be scored and roughly what that costs per model.
+   Press **Start run**. Set *Stop when spend reaches* if you want a safety limit.
 
-Ask Claude (with the *pr-review-audit* skill): **“Run the code review audit for org/repo-a and org/repo-b, last 3 months.”**
-Claude runs the steps below, scores every new or changed PR, and the dashboard picks it up.
-The skill lives in `C:\Users\Nazurudeen\.claude\skills\pr-review-audit\SKILL.md`, so it works from any Claude Code session.
+The green/red chips at the top show what is configured. If you only want fresh data, pick *Don't score, collect only*.
 
-Manual equivalent:
+### Jobs (admins): watch a run
 
-```bat
-py audit.py collect --repos org/repo-a org/repo-b --months 3     REM or --since 2026-05-01 --until 2026-11-03
-py audit.py pending --months 3        REM writes bundles\ for PRs not yet scored
-REM   -> Claude evaluates each bundle and writes evals\<same name>.json
-py audit.py ingest                    REM loads the scores into audit.db
-py audit.py status                    REM counts and what is still pending
-```
+A progress bar, the money spent, a log of what happened, and a **Cancel** button. One job runs at a time; waiting jobs
+start by themselves, and a restart picks up where it stopped.
 
-**Which PRs are included:** every PR with activity in the period — **open, merged, and closed without merging** —
-including PRs opened earlier but merged, closed or given new commits inside the period, with **all** their commits
-(large PRs are paged; GitHub itself caps a PR's commit list at 250). Dates in the dashboard use each PR's
-*last activity*. Branch promotions (e.g. `dev-uae → uat`) are listed but not scored; bot PRs are skipped.
+### Repos (admins): tracked repos and automatic refresh
 
-Re-running any period is safe: PRs, commits and comments are stored once (by their GitHub IDs), and a PR is
-only re-scored when it gets new commits or the rubric version changes.
+*Tracked repos* are the ones kept up to date. **Automatic refresh** is explained in section 4.
 
----
+### Skill & models (admins): how scoring works, in plain words
 
-## GitHub access (read-only)
+**You do not have to touch this.** The defaults work. Open it when you want to spend less, be stricter, or check
+what the AI is told. It has three tabs, each with a help box at the top:
 
-The token lives in **`.github_token`** in this folder (one line, nothing else). Never share or commit it.
-Fine-grained token settings:
+- **Models & routing: which AI model scores which PR.** Think of three reviewers: **Opus** (most careful, most
+  expensive), **Sonnet** (balanced) and **Haiku** (fastest, cheapest). The list of rules decides who gets which PR.
+  The rules are read **from the top; the first one that fits wins**, and the last rule is the catch-all.
+  The default: tiny PRs (up to 120 lines) go to Haiku, big (800+ lines), shared or security-related PRs go to Opus,
+  everything else to Sonnet. Examples:
+  - *Spend less*: change the last rule ("Everything else") from Sonnet to Haiku, then **Save routing**.
+  - *Be more careful on one project*: **Add rule**, put its repo name in *Repos*, choose Opus, and move it to the top.
+  - *Not sure what a PR would get?* Use **Test** at the bottom: enter a size and press it.
+  - **agent** = the style of review. `scorer` reads the PR in one go; `deep-scorer` reads large or sensitive PRs
+    file by file (slower, costs more, more thorough).
+  - **effort** = how hard the model thinks (low is cheaper and faster, high is more thorough).
+- **Skill & agents: the written instructions the AI follows.** `SKILL.md` is how to work through a PR, `rubric.md` is
+  what "good" means (the standards and weights), and `agents/…` define the reviewers. Click a file to edit it, use
+  **Preview** to read it formatted, add a note, and **Save as new version**. Every score remembers which version made it,
+  you can load or re-activate any old version, and **Back to repo version** returns to the shipped text.
+  **Saving never re-scores old PRs by itself.** When you want the new instructions applied to old PRs, tick
+  *re-score PRs scored with an older skill version* on the Run page.
+- **Try on a PR: test before you trust it.** Choose a project and PR number (already collected) and press **Score it**.
+  You see the AI's scores next to the stored ones. **Nothing is saved**; it costs a few cents. Tick the box to try your
+  unsaved edit against the version in use.
 
-- **Resource owner:** your organization · **Repository access:** all or selected repos
-- **Repository permissions (all Read-only):** `Contents`, `Pull requests`, `Metadata`, optionally `Commit statuses`
-- If your org requires approval, an owner approves it under *Organization → Settings → Personal access tokens → Pending requests*.
+### Access (admins): who can sign in
 
-Check the token works: `py audit.py collect --repos org/some-repo --months 1`.
-“Bad credentials” = token wrong/expired/revoked → generate a new one and replace the file contents.
+Shows what the server is configured with (set / not set) and a table of **people**: a GitHub login, id or email, a role
+(admin / viewer / self) and which collected person's data they see. Add a row to let someone outside the org in, to
+link a person who uses a different email, or to switch someone off.
 
----
+## 4. Keep the data up to date automatically
 
-## People
+If the settings are complete, you never need to press Run: the app refreshes by itself.
 
-Users are discovered automatically. Unique key = GitHub numeric user ID (`gh:12345`, survives username changes).
-Commit emails are linked by GitHub; personal emails used inside someone’s PR are linked when they clearly match
-the author. Fix anything left over with `py audit.py merge-users email:x@y.com gh:12345`. Bots are excluded.
-`py audit.py people` lists everyone with their aliases and flags unlinked commit emails or duplicate names.
+1. In `.env` set `GITHUB_TOKEN`, `GITHUB_ORG` and **`AUTO_REFRESH_HOURS=6`** (any number of hours), then restart.
+2. About a minute after it starts, and then every 6 hours, it asks GitHub for everything that changed in the last
+   `AUTO_REFRESH_MONTHS` (default 1) and stores it. With no tracked repos it uses **every active repo of the
+   organisation**; if you track repos on the **Repos** tab, only those.
+3. `AUTO_SCORE` says what happens to the new PRs: `none` (default: just fresh data, no cost, they show as
+   "awaiting evaluation"), `heuristic` (free rough score) or `llm` (full AI score, needs `ANTHROPIC_API_KEY`;
+   `AUTO_MAX_USD`, default 5, is the cap per run).
 
-**Shared PRs.** When several people commit to one PR (or a commit has `Co-authored-by:`), each person answers
-for their own commits: every committer is scored on the commit messages and code quality of their own commits,
-and the PR owner also answers for validation and review response. Merge commits that only bring a base branch
-in are ignored. The person page shows PRs they own and other people's PRs they committed to, plus the code
-issues traced to their commits. See skills/pr-scoring/rubric.md §6c.
+You can see it, change it or switch it off on **Repos → Automatic refresh** (settings saved there win over `.env`;
+**Go back to the .env setting** undoes that). The status shows when it last ran and when it runs next.
+It never fails because of a missing key: if `llm` is chosen without a key it only collects.
 
-**Whole organisation.** `py audit.py repos --org myorg --months 3` lists repos pushed in the period;
-`py audit.py collect --org myorg --months 3` collects all of them.
+## 5. Put it on a server for the team
 
-## Deploy it (a web app for the team)
+One container runs everything: dashboard, admin screens and the background worker.
 
-One container (or one Python process) runs the dashboard, the admin screens and a background worker that pulls from
-GitHub and scores. Keys are **environment variables only**; they are never typed into the UI or shown in it.
+1. **Put the code in git** (`.gitignore` already keeps `.env`, the token and the database out). Never commit `audit.db`.
+2. **Optional: bring your existing results.** `py audit.py backup --out data/audit.db`, then copy that file to the
+   server's `data/` folder over a private channel. Starting empty also works.
+3. **Create the GitHub OAuth app** (lets people sign in with GitHub): [docs/github-oauth-setup.md](docs/github-oauth-setup.md).
+4. **Fill in `.env`** on the server (see `.env.example`, block 4): `PUBLIC_URL`, the OAuth id and secret,
+   `AUDIT_SESSION_SECRET` (a long random string), `ADMIN_USERS`, optionally `VIEWER_PASSWORD`.
+5. **Start:** `docker compose up -d --build`. Open `PUBLIC_URL`. Put **HTTPS** in front (nginx/Caddy or the
+   cloud's load balancer). `GET /healthz` is the health check. Without Docker: `pip install -r requirements-llm.txt`,
+   set the same variables, `python3 audit.py serve --host 0.0.0.0`.
 
-**1. Put the code in git.** `.gitignore` keeps the token, `.env`, the database and working files out.
-Never commit `audit.db`: it holds people's scores and security findings.
-
-**2. (Optional) ship your existing analysis.** Make a consistent copy and put it on the server as `data/audit.db`:
-
-```bash
-py -3 audit.py backup --out data/audit.db
-```
-
-Starting empty also works: use **Run** in the app to collect and score.
-
-**3. Create the GitHub OAuth app** for sign-in: step by step in [docs/github-oauth-setup.md](docs/github-oauth-setup.md).
-
-**4. Configure and start:**
-
-```bash
-cp .env.example .env     # fill in the keys, org, OAuth app, ADMIN_USERS, VIEWER_PASSWORD
-docker compose up -d --build   # app on http://<server>:8765, database in ./data/audit.db
-```
-
-Without Docker: `pip install -r requirements-llm.txt`, export the same variables, then `python3 audit.py serve --host 0.0.0.0`.
-Put **HTTPS** in front (nginx/Caddy or the cloud load balancer); `GET /healthz` is the health check.
-The server **refuses to listen on a network address without a login method** configured.
-
-### Who can do what
+The server refuses to listen on a network address if no sign-in method is configured.
 
 | Role | Sees | Can do | How someone gets it |
 |---|---|---|---|
-| **Admin** | everything | run / cancel jobs, pick and track repos, change model routing, edit the skill and agents, try on a PR, manage people and access | GitHub login in `ADMIN_USERS`, or a row in **Access** with role admin |
-| **Viewer** | every project and person, read-only | nothing | the shared `VIEWER_PASSWORD` (office TV), GitHub login in `VIEWER_USERS`, or a row with role viewer |
-| **Self** | only their own PRs, scores, reviews and talking points | nothing | sign in with GitHub as a person found in the repos: matched by GitHub id or a verified email; org members (`GITHUB_ORG`) match automatically, anyone else needs a row in **Access** |
+| **Admin** | everything | run jobs, choose repos, change models, edit the skill, manage people | GitHub login in `ADMIN_USERS`, or a row in **Access** |
+| **Viewer** | every project and person, read-only | nothing | the shared `VIEWER_PASSWORD`, a login in `VIEWER_USERS`, or a row in **Access** |
+| **Self** | only their own PRs, scores and reviews | nothing | signing in with GitHub as a person found in the repos (matched by GitHub id or a verified email; org members match automatically; others need a row in **Access**) |
 
-Self is enforced on the server (other people's pages, PRs and scores are refused, not just hidden). On a shared PR a
-person sees the other committers' names but not their scores. A person who only *reviewed* a PR sees just their own
-reviewer assessment of it. Someone who is not matched and has no role gets an "access denied" page; an admin can switch
-anyone off in **Access** and their session ends on the next request.
+"Self" is enforced on the server: other people's pages are refused, not just hidden. On a shared PR a person sees the
+other committers' names but not their scores. Someone who is not matched gets an "access denied" page.
 
-**Office TV:** open `/login`, enter the viewer password and keep "TV mode" ticked, or go to `/?kiosk=1` (add
-`&rotate=20` to cycle through people every 20 seconds). The screen refreshes itself every 5 minutes and the session lasts
-30 days. The password is shared, so change it when someone leaves.
+**Office TV:** open the server's `/login`, enter the viewer password and keep *TV mode* ticked (or open `/?kiosk=1`;
+add `&rotate=20` to cycle through people every 20 seconds). It refreshes itself every 5 minutes and stays signed in for
+30 days. Everyone who knows the password sees all scores, so change it when someone leaves.
 
-**Local use:** with no login configured the app only listens on `127.0.0.1` and everyone is admin
-(`run_dashboard.bat` does this).
+## 6. When something goes wrong
+
+| What you see | Why / what to do |
+|---|---|
+| Run page: "set GITHUB_ORG on the server" | Add `GITHUB_ORG=<your org>` to `.env` and restart. You can still type repos as `owner/name`. |
+| Chip "✗ GitHub token" | `GITHUB_TOKEN` is missing or the `.github_token` file is empty. "Bad credentials" in a job log means the token is wrong or expired: make a new one. |
+| Job failed: "ANTHROPIC_API_KEY is not set" | Add the key to `.env` and restart, or choose rule-based / collect only. |
+| `.env` changes do nothing | Restart the app: it reads `.env` when it starts. Variables set in the real environment win over `.env`. |
+| Estimate says 0 PRs | Nothing to score yet: collect first, or everything in that period is already scored. |
+| Sign-in: "redirect_uri is not associated…" | The OAuth app's callback URL must be exactly `PUBLIC_URL` + `/auth/callback`. |
+| Everyone is signed out after a restart | Set `AUDIT_SESSION_SECRET` to a fixed value. |
+| "access denied" for a developer | They are not matched. Add a row in **Access** (their GitHub login and which person they are). |
+| Server won't start on a network address | Configure a sign-in method (OAuth or `VIEWER_PASSWORD`). |
+| Read-only server says the database predates the app | Start once without `AUDIT_READONLY=1` so it can upgrade the database. |
+
+## 7. Reference
+
+### How a PR gets its score
+
+Four areas, each 1 to 5, weighted: commit messages 15%, code quality 40%, validation (CI, tests) 20%, handling review
+feedback 25%. Everything is spelled out in `skills/pr-scoring/rubric.md` (also under **Standards** in the app).
+Scores come from one of three **engines**; the dashboard shows which:
+
+| Engine | Needs | Quality |
+|---|---|---|
+| **LLM with the skill** | `ANTHROPIC_API_KEY` | a senior-reviewer read of the diff; routing picks the model |
+| **Claude Code agents** (how the first data was made) | a Claude Code session | same review |
+| **Rule-based** | nothing, free | objective checks only (commit format, CI, tests, description, size, self-merge, hard-coded secrets, risky APIs). It does not read the logic, so code quality is capped at 4 and marked as an estimate |
+
+Batch mode (a Run option) sends the PRs to the Message Batches API: **half price**, results usually within an hour.
+
+**Which PRs count:** every PR with activity in the period (open, merged, closed unmerged), with all its commits.
+Branch promotions (e.g. `dev → uat`) are listed but not scored; bot PRs are skipped. Re-running a period is safe:
+nothing is stored twice, and a PR is only re-scored when it gets new commits (or you ask for a re-score).
+
+**Shared PRs:** when several people commit to one PR (or use `Co-authored-by:`), each answers for their own commits;
+the PR owner also answers for validation and review response. AI co-authors (Claude, Copilot, Cursor) are not scored.
+
+**People:** found automatically; the key is the GitHub id. Fix duplicates with
+`py audit.py merge-users email:x@y.com gh:12345`; list everyone with `py audit.py people`.
+
+### Command line (same engine as the Run page)
+
+```bash
+py audit.py score --engine llm --collect --repos org/a org/b --months 3 --max-usd 5
+py audit.py score --engine llm --estimate --repos org/a          # what it would cost
+py audit.py score --engine llm --batch --repos org/a             # half price, slower
+py audit.py score --engine heuristic --months 3                  # free rule-based
+py audit.py collect --org myorg --months 3                       # collect only
+py audit.py backup --out audit-backup.db                         # consistent copy of the database
+py audit.py status | people | pending | ingest | merge-users | --help
+```
+
+### All settings
 
 | Variable | Purpose |
 |---|---|
-| `GITHUB_TOKEN` | read-only token (Contents, Pull requests, Metadata, Commit statuses) used to collect |
-| `GITHUB_ORG` | default organisation for the repo picker, and the org check for sign-in |
-| `ANTHROPIC_API_KEY` | needed for LLM scoring (`pip install -r requirements-llm.txt`) |
-| `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `PUBLIC_URL` | GitHub sign-in (`PUBLIC_URL` = the address people open) |
-| `AUDIT_SESSION_SECRET` | signs login cookies; set a long random value, or logins end at every restart |
-| `ADMIN_USERS`, `VIEWER_USERS` | GitHub logins, comma separated |
-| `VIEWER_PASSWORD` | shared password for read-only screens (throttled: 5 wrong tries, 10 minutes) |
-| `DASHBOARD_USER` / `DASHBOARD_PASSWORD`, `DASHBOARD_USERS` | HTTP Basic logins for scripts / local use; they are admins |
-| `HOST`, `PORT`, `AUDIT_DB` | where to listen, which database (container: `0.0.0.0:8765`, `/data/audit.db`) |
-| `AUDIT_CONCURRENCY` | scoring calls in flight at once (default 3, max 8) |
-| `AUDIT_READONLY=1` | viewing-only server: no jobs, no admin changes; the database must already be migrated |
+| `GITHUB_TOKEN`, `GITHUB_ORG` | collecting; repo picker; org check at sign-in |
+| `ANTHROPIC_API_KEY`, `AUDIT_CONCURRENCY` | LLM scoring; calls in flight at once (1 to 8, default 3) |
+| `AUTO_REFRESH_HOURS`, `AUTO_REFRESH_MONTHS`, `AUTO_SCORE`, `AUTO_MAX_USD` | automatic refresh (section 4) |
+| `PUBLIC_URL`, `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `AUDIT_SESSION_SECRET` | GitHub sign-in |
+| `ADMIN_USERS`, `VIEWER_USERS`, `VIEWER_PASSWORD` | roles and the TV password |
+| `DASHBOARD_USER` / `DASHBOARD_PASSWORD`, `DASHBOARD_USERS` | HTTP Basic logins for scripts (they are admins) |
+| `HOST`, `PORT`, `AUDIT_DB`, `AUDIT_READONLY=1` | where it listens, which database, viewing-only mode |
 | `AUDIT_FALLBACKS=0` | don't let the API retry a refused request on a fallback model |
 
-## Running audits from the app (admins)
-
-Top bar (admins only): **Run · Jobs · Repos · Skill & models · Access**.
-
-1. **Run**: pick repositories (listed from your org; filter, "only pushed in the period"), pick the period, choose what to
-   do (collect from GitHub, then score with the LLM skill / rule-based / not at all), set optional limits (stop after N PRs,
-   stop at a spend cap), press **Estimate cost**, then **Start run**. Collecting is plain code with no LLM; only scoring
-   calls the model. "Batch mode" uses the Message Batches API: half price, results usually within an hour.
-2. **Jobs**: live progress, tokens and cost, a log, **Cancel**. One job runs at a time; the queue survives a restart and
-   a batch is picked up again instead of being paid for twice.
-3. **Repos**: tracked repos (the default for runs and for the schedule), pause / remove, and an optional **scheduled
-   refresh** (every N hours, with a spend cap).
-4. **Skill & models**: see below.
-5. **Access**: server configuration status (set / not set; never the values) and the people table: GitHub login / id /
-   email / name, role, and which collected person they are, active on/off.
-
-### Which model scores which PR
-
-**Skill & models → Models & routing** is an ordered list of rules; the first match wins and the last rule is the default.
-A rule can look at lines changed, files, shared PR, truncated diff, repo (globs), changed paths (regex), state and how
-it was scored before, and chooses an **agent**, a **model** and an **effort**. Defaults: security-sensitive paths go to
-the investigating agent on Opus; 800+ line, shared and truncated PRs to Opus; PRs of 120 lines or less to Haiku; the rest
-to Sonnet. Prices used for the estimate are in `skills/pr-scoring/models.json`; the **Estimate** shows the cost per model.
-
-### The scoring skill (fine-tune it)
-
-The instructions the model follows live in `skills/pr-scoring/`:
-
-| File | What it is |
-|---|---|
-| `SKILL.md` | the procedure and the rules the importer depends on |
-| `rubric.md` | the standards and weights (the old `STANDARDS.md` now points here) |
-| `agents/scorer.md` | default agent: one call per PR (`mode: single`) |
-| `agents/deep-scorer.md` | investigating agent (`mode: agentic`): reads the diff file by file with tools, then scores |
-| `models.json` | model prices and the default routing rules |
-
-Edit them in **Skill & models → Skill & agents** (saved as a new *version* with a short hash; reset any time to the repo
-files) and add your own agents (front matter: `mode`, `effort`, `max_turns`, `max_diff_chars`). Every score records the
-model, agent and skill version that made it. **Editing the skill does not re-score anything by itself**; tick "re-score PRs
-scored with an older skill version" on **Run** when you want that. **Try on a PR** scores one collected PR with the
-editor's unsaved text, shows it next to the active version and the stored score, and saves nothing.
-(The JSON the importer reads is defined in code, `scoring.EVAL_SCHEMA`, not in the editable skill.)
-
-## Scoring engines
-
-| Engine | Needs | Quality | Where |
-|---|---|---|---|
-| **LLM with the skill** (default in the app) | `ANTHROPIC_API_KEY`, `pip install -r requirements-llm.txt` | senior-reviewer read of the diff; routing picks the model | **Run**, or `python audit.py score --engine llm` |
-| **Claude Code agents** (how the first data was made) | a Claude Code session | same review | the *pr-review-audit* skill (`pending` → evals → `ingest`) |
-| **Rule-based** | nothing: no LLM, no token, free | objective checks only; does **not** read the logic, so code quality is capped at 4 and marked as an estimate | **Run**, or `python audit.py score --engine heuristic` |
-
-An LLM run also upgrades PRs that only have a rule-based score. Rule-based scores are not picked up by `pending`, so if
-you want Claude Code agents to score some PRs, run them before the rule-based pass.
-
-## Command line
-
-```bash
-py audit.py score --engine llm --collect --repos org/a org/b --months 3 --max-usd 5   # same pipeline as the Run page
-py audit.py score --engine llm --estimate --repos org/a                                # what it would cost
-py audit.py score --engine llm --batch --repos org/a                                   # half price, asynchronous
-py audit.py collect|pending|ingest|status|people|backup|merge-users ...                # see `py audit.py --help`
-```
-
-## Files
+### Files
 
 | File / folder | Purpose |
 |---|---|
-| `run_dashboard.bat` | Double-click to open the dashboard locally |
-| `audit.py` | Command line |
-| `server.py` | Web server: pages, JSON API, login, admin endpoints, role checks |
-| `auth.py` | Sessions, GitHub OAuth, roles, viewer password, CSRF |
-| `jobs.py` | Background worker: collect → score, estimate, batch, cancel, resume, try-on-PR, schedule |
-| `scoring.py` | Rule-based engine and the Anthropic-API engine (single call, investigating agent, batch) |
-| `routing.py` | Model / effort / agent rules, model prices, cost estimate |
-| `skill.py` | Loads, validates and versions the scoring skill |
-| `control.py` | Settings, tracked repos, people table, job records |
-| `github.py` | Read-only GitHub client |
-| `store.py` | Database writes (no duplicates) and dashboard queries, including the "self" redaction |
-| `schema.sql` | Database structure |
-| `skills/pr-scoring/` | The scoring skill: `SKILL.md`, `rubric.md`, `agents/`, `models.json` |
-| `STANDARDS.md` | Pointer to `skills/pr-scoring/rubric.md` |
-| `dashboard/` | `index.html` (dashboard), `admin.js` (admin screens), `login.html` |
-| `docs/github-oauth-setup.md` | Creating the GitHub OAuth app |
-| `Dockerfile`, `docker-compose.yml`, `.env.example`, `requirements-llm.txt` | Hosting |
-| `tests/e2e_test.py`, `tests/app_test.py` | Offline self-tests (fake GitHub, fake LLM, fake OAuth): `py tests\app_test.py` runs both |
-| `data/` | Database copy for the hosted app (not in git) |
-| `audit.db`, `bundles/`, `evals/`, `.github_token` | Your data and working files (not in git) |
+| `run_dashboard.bat` | double-click to start locally |
+| `.env`, `.env.example` | your settings (not committed), and the annotated template |
+| `audit.py`, `envfile.py` | command line; `.env` reader |
+| `server.py`, `auth.py` | web server, API, roles; sign-in, sessions, CSRF |
+| `jobs.py` | background worker: collect, score, estimate, batch, cancel, resume, automatic refresh |
+| `scoring.py`, `routing.py`, `skill.py` | scoring engines; model rules and prices; the skill loader |
+| `control.py`, `store.py`, `schema.sql`, `github.py` | settings and jobs; database and dashboard queries; table layout; read-only GitHub client |
+| `skills/pr-scoring/` | the scoring skill: `SKILL.md`, `rubric.md`, `agents/`, `models.json` (model prices, default rules) |
+| `STANDARDS.md` | pointer to `skills/pr-scoring/rubric.md` |
+| `dashboard/` | `index.html`, `admin.js`, `login.html` |
+| `docs/github-oauth-setup.md` | creating the GitHub OAuth app |
+| `Dockerfile`, `docker-compose.yml`, `requirements-llm.txt` | hosting |
+| `tests/` | offline self-tests with fake GitHub, AI and sign-in: `py tests\app_test.py` |
+| `audit.db`, `data/`, `backups/`, `bundles/`, `evals/`, `.github_token` | your data and working files (not committed) |

@@ -6,7 +6,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1]
 WORK = Path(tempfile.mkdtemp())
 for f in ["audit.py", "store.py", "github.py", "scoring.py", "schema.sql", "control.py", "skill.py", "routing.py",
-          "auth.py", "jobs.py", "server.py", "STANDARDS.md"]:
+          "auth.py", "jobs.py", "server.py", "envfile.py", "STANDARDS.md"]:
     shutil.copy(SRC / f, WORK / f)
 shutil.copytree(SRC / "dashboard", WORK / "dashboard")
 shutil.copytree(SRC / "skills", WORK / "skills")

@@ -42,6 +42,10 @@ def clean_job_params(kind, b):
                     out[k] = datetime.date.fromisoformat(str(b[k])).isoformat()
                 except ValueError:
                     raise ValueError(f"{k} must be YYYY-MM-DD")
+        if b.get("org"):
+            if not re.match(r"^[A-Za-z0-9-]{1,39}$", str(b["org"])):
+                raise ValueError("org is not a valid GitHub organisation name")
+            out["org"] = b["org"]                      # with no repos: every repo of the org with recent activity
         out["months"] = _int(b.get("months", 3), "months", 1, 36)
         out["score"] = b.get("score", "llm")
         if out["score"] not in ("llm", "heuristic", "none"):
@@ -148,11 +152,8 @@ def serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, p
             self.send(302, b"", "text/plain", [("Location", where), *headers])
 
         def body(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                raise HttpError(413, "body too large")
             try:
-                return json.loads(self.rfile.read(n) or b"{}")
+                return json.loads(self._raw or b"{}")
             except ValueError:
                 raise HttpError(400, "body is not JSON")
 
@@ -195,6 +196,13 @@ def serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, p
         def do_DELETE(self): self.dispatch("DELETE")
 
         def dispatch(self, method):
+            # Always read the request body before answering: replying (e.g. 403) with an unread body can make the
+            # client's connection reset before it sees the response.
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                self.close_connection = True
+                return self.send(413, {"error": "body too large"})
+            self._raw = self.rfile.read(n) if n else b""
             u = urllib.parse.urlparse(self.path)
             path, q = u.path, {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
             try:
@@ -348,7 +356,7 @@ def serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, p
                     "github_token": github.token_present(), "anthropic_key": scoring.api_key_present(), "sdk_installed": scoring.sdk_installed(),
                     "org": cfg.org or None, "oauth": cfg.oauth, "viewer_password": bool(cfg.viewer_password), "public_url": cfg.public_url or None,
                     "session_secret": bool(cfg.secret), "problems": cfg.problems(), "readonly": readonly,
-                    "skill_hash": h, "skill_source": source, "schedule": control.get_setting(db, "schedule") or {"enabled": False},
+                    "skill_hash": h, "skill_source": source, "schedule": jobs.effective_schedule(db), "schedule_last": control.get_setting(db, "schedule_last"),
                     "concurrency": int(os.environ.get("AUDIT_CONCURRENCY", 3))})
             if first == "github" and parts[1:] == ["repos"]:
                 return self.send(200, self.github_repos(db, q))
@@ -399,10 +407,13 @@ def serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, p
             first, who = parts[0], me.get("login")
             b = self.body() if method in ("POST", "PUT") else {}
             if first == "settings" and method == "PUT":
-                if "schedule" in b:
+                if b.get("schedule_reset"):                  # go back to what the .env says
+                    control.del_setting(db, "schedule")
+                elif "schedule" in b:
                     s = b["schedule"] or {}
                     sc = {"enabled": bool(s.get("enabled")), "every_hours": _int(s.get("every_hours", 24), "every_hours", 1, 720),
-                          "months": _int(s.get("months", 1), "months", 1, 36), "score": s.get("score", "llm")}
+                          "months": _int(s.get("months", 1), "months", 1, 36), "score": s.get("score", "none"),
+                          "all_org": bool(s.get("all_org"))}
                     if sc["score"] not in ("llm", "heuristic", "none"):
                         raise ValueError("score must be llm, heuristic or none")
                     if s.get("max_usd"):

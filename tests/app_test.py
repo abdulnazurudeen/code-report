@@ -443,4 +443,89 @@ try:
     server.serve(str(old), PORT + 1, readonly=True); raise AssertionError("must refuse")
 except SystemExit as e:
     ok("predates the web app" in str(e), e)
+
+# ------------------------------------------------------------------ 4. .env loader, automatic refresh, markdown
+import envfile
+parsed = envfile.parse('# c\nA=1\nB = two words  # note\nC="quoted # kept"\nexport D=4\nE=\nnot a line\n')
+ok(parsed == {"A": "1", "B": "two words", "C": "quoted # kept", "D": "4", "E": ""}, parsed)
+envp = WORK / "t.env"; envp.write_text("TEST_ENVFILE_A=from-file\nTEST_ENVFILE_B=\nTEST_ENVFILE_C=file\n", encoding="utf-8")
+os.environ["TEST_ENVFILE_C"] = "real"
+ok(envfile.load(envp) == ["TEST_ENVFILE_A"] and os.environ["TEST_ENVFILE_A"] == "from-file" and os.environ["TEST_ENVFILE_C"] == "real" and "TEST_ENVFILE_B" not in os.environ, "real environment wins; empty values skipped")
+ok(envfile.load(WORK / "missing.env") == [], "missing file is fine")
+
+# automatic refresh: switched on by the environment, safe by default
+for k in ("AUTO_REFRESH_HOURS", "AUTO_REFRESH_MONTHS", "AUTO_SCORE", "AUTO_MAX_USD"):
+    os.environ.pop(k, None)
+control.del_setting(db, "schedule"); control.del_setting(db, "schedule_last"); db.commit()
+ok(jobs.effective_schedule(db) == {"enabled": False, "source": "none"}, "off unless asked")
+os.environ.update(AUTO_REFRESH_HOURS="6", AUTO_SCORE="llm", AUTO_REFRESH_MONTHS="2")
+es = jobs.effective_schedule(db)
+ok(es["enabled"] and es["every_hours"] == 6 and es["months"] == 2 and es["source"] == "environment" and es["all_org"] and es["max_usd"] == 5, es)
+os.environ["AUTO_REFRESH_HOURS"] = "abc"; ok(not jobs.effective_schedule(db)["enabled"], "a bad value switches it off, not the server"); os.environ["AUTO_REFRESH_HOURS"] = "6"
+
+def sched_jobs():
+    return db.execute("SELECT * FROM jobs WHERE created_by='scheduler' ORDER BY id").fetchall()
+db.execute("UPDATE tracked_repos SET enabled=0"); db.execute("UPDATE jobs SET status='cancelled' WHERE status IN ('queued','running')"); db.commit()
+os.environ.pop("ANTHROPIC_API_KEY", None)
+runner = jobs.JobRunner(DBP)
+runner.schedule(db)
+sj = sched_jobs(); ok(len(sj) == 1, "first check starts a run straight away")
+sp = json.loads(sj[0]["params"])
+ok(sp["org"] == "gem3s" and sp["collect"] and sp["months"] == 2 and sp["score"] == "none", sp)            # llm without a key downgrades to collect-only
+control.update_job(db, sj[0]["id"], status="cancelled"); db.commit()                                         # keep the server's own worker out of this test
+runner.schedule(db); ok(len(sched_jobs()) == 1, "not again before the interval is over")
+control.set_setting(db, "schedule_last", time.time() - 7 * 3600); db.commit()
+runner.schedule(db); ok(len(sched_jobs()) == 2, "due again after the interval")
+control.update_job(db, sched_jobs()[1]["id"], status="cancelled"); db.commit()
+db.execute("UPDATE tracked_repos SET enabled=1"); control.set_setting(db, "schedule_last", time.time() - 7 * 3600); db.commit()
+runner.schedule(db); last = sched_jobs()[-1]
+ok("org" not in json.loads(last["params"]) and "repos" not in json.loads(last["params"]), "tracked repos win: the job uses them by default")
+control.update_job(db, last["id"], status="cancelled"); db.commit()
+os.environ["ANTHROPIC_API_KEY"] = "sk-test-secret-123"
+
+# discovering the org's active repos inside a job
+G["FakeGH"].org_repos = lambda self, org: [
+    {"full_name": f"{org}/payments", "pushed_at": "2026-10-30T00:00:00Z", "default_branch": "main", "archived": False, "fork": False},
+    {"full_name": f"{org}/orders", "pushed_at": "2026-10-20T00:00:00Z", "default_branch": "main", "archived": False, "fork": False},
+    {"full_name": f"{org}/old-stuff", "pushed_at": "2025-01-01T00:00:00Z", "default_branch": "main", "archived": False, "fork": False},
+    {"full_name": f"{org}/archived", "pushed_at": "2026-10-30T00:00:00Z", "default_branch": "main", "archived": True, "fork": False}]
+j = run_job({"org": "gem3s", "since": SINCE, "until": TODAY, "score": "none"})
+ok(j["status"] == "done" and sorted(j["summary"]["repos"]) == ["gem3s/orders", "gem3s/payments"] and set(j["summary"]["collect"]) == set(j["summary"]["repos"]), j["summary"])
+ok(any("had activity since" in e["message"] for e in j["events"]), "log says how many repos were found")
+
+# the schedule through the API: saved settings win, "back to .env" undoes it
+ADMIN2, _, _ = login("c-alice")
+st, d, _ = call("GET", "/api/settings", cookie=ADMIN2)
+ok(d["schedule"]["source"] == "environment" and d["schedule"]["enabled"] and "schedule_last" in d, d["schedule"])
+ok(call("PUT", "/api/settings", {"schedule": {"enabled": False, "every_hours": 3, "months": 1, "score": "none", "all_org": True}}, cookie=ADMIN2)[0] == 200, "save schedule")
+d = call("GET", "/api/settings", cookie=ADMIN2)[1]; ok(d["schedule"]["source"] == "saved" and not d["schedule"]["enabled"] and d["schedule"]["all_org"], d["schedule"])
+ok(call("PUT", "/api/settings", {"schedule": {"enabled": True, "score": "magic"}}, cookie=ADMIN2)[0] == 400, "bad score refused")
+ok(call("PUT", "/api/settings", {"schedule_reset": True}, cookie=ADMIN2)[0] == 200 and call("GET", "/api/settings", cookie=ADMIN2)[1]["schedule"]["source"] == "environment", "back to the .env setting")
+ok(call("POST", "/api/jobs", {"kind": "refresh", "org": "bad org", "score": "none"}, cookie=ADMIN2)[0] == 400, "org name validated")
+for k in ("AUTO_REFRESH_HOURS", "AUTO_REFRESH_MONTHS", "AUTO_SCORE"):
+    os.environ.pop(k, None)
+
+# markdown renderer in the dashboard (needs node; skipped without it)
+import shutil, subprocess
+if shutil.which("node"):
+    html = (WORK / "dashboard" / "index.html").read_text(encoding="utf-8")
+    fn = html[html.index("function md(src){"):html.index("\n}\n", html.index("function md(src){")) + 3]
+    js = ("const esc = s => (s ?? '').toString().replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));\n" + fn +
+          "\nconst out = md(require('fs').readFileSync(0, 'utf8')); process.stdout.write(out);")
+    sample = ("# Title\n\nSome **bold**, *it* and `code` with [a link](https://example.com).\n\n- one\n- two\n\n1. first\n2. second\n\n"
+              "| A | B |\n|---|---|\n| 1 | 2 |\n\n```\nraw <b>text</b>\n```\n\n> quoted\n\n---\n| not a table\n<script>alert(1)</script>\n[x](javascript:alert(1))\n")
+    out = subprocess.run(["node", "-e", js], input=sample.encode("utf-8"), capture_output=True, timeout=30)
+    ok(out.returncode == 0, out.stderr)
+    h = out.stdout.decode("utf-8")
+    for needle in ("<h2>Title</h2>", "<b>bold</b>", "<i>it</i>", "<code>code</code>", '<a href="https://example.com"', "<ul><li>one</li><li>two</li></ul>",
+                   "<ol><li>first</li><li>second</li></ol>", "<table", "<th>A</th>", "<td>2</td>", "&lt;b&gt;text&lt;/b&gt;", "<blockquote>quoted</blockquote>", "<hr>"):
+        ok(needle in h, f"markdown: missing {needle}")
+    ok("<script" not in h and 'href="javascript' not in h, "markdown output is escaped (no script, no javascript: links)")
+    rubric = (WORK / "skills" / "pr-scoring" / "rubric.md").read_text(encoding="utf-8")
+    out = subprocess.run(["node", "-e", js], input=rubric.encode("utf-8"), capture_output=True, timeout=30)
+    html_out = out.stdout.decode("utf-8")
+    ok(out.returncode == 0 and html_out.count("<h2>") == 1 and html_out.count("<h3>") >= 5 and "<table" in html_out and chr(10) + "#" not in html_out, "the real rubric renders")
+else:
+    print("(node not found: markdown renderer test skipped)")
+
 print("\nAPP CHECKS PASSED")

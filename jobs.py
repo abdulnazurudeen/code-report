@@ -37,6 +37,25 @@ def shared_pr(db, pr_id):
     return sum(1 for d in people if d["commits"]) > 1 or any(d["commits"] and not d["is_owner"] for d in people)
 
 
+def effective_schedule(db):
+    """The automatic-refresh settings in force: what an admin saved in the UI, else what the environment asks for.
+      AUTO_REFRESH_HOURS=6   switch it on (needs GITHUB_TOKEN); AUTO_REFRESH_MONTHS=1 how far back each run looks
+      AUTO_SCORE=none|heuristic|llm   what to do after collecting (default none: data only, no cost)
+      AUTO_MAX_USD=5         spend cap per run when scoring with the LLM"""
+    saved = control.get_setting(db, "schedule")
+    if saved is not None:
+        return {**saved, "source": "saved"}
+    try:
+        hours = float(os.environ.get("AUTO_REFRESH_HOURS") or 0)
+        if hours > 0:
+            return {"enabled": True, "every_hours": hours, "months": int(os.environ.get("AUTO_REFRESH_MONTHS") or 1),
+                    "score": os.environ.get("AUTO_SCORE", "none"), "max_usd": float(os.environ.get("AUTO_MAX_USD") or 5),
+                    "all_org": True, "source": "environment"}
+    except ValueError:
+        pass
+    return {"enabled": False, "source": "none"}
+
+
 def _repo_filter(params, db):
     repos = params.get("repos")
     if not repos:
@@ -145,10 +164,14 @@ class Ctx:
 def run_refresh(ctx):
     import audit
     db, params = ctx.db, ctx.params
+    since, until = _window(params)
+    if not params.get("repos") and params.get("org"):
+        # "every active repo of the organisation": discover them now (read-only GitHub call)
+        params["repos"] = audit.active_repos(_github(), params["org"], since)
+        ctx.log(f"{len(params['repos'])} repo(s) in {params['org']} had activity since {since}")
     repos = _repo_filter(params, db)
     if not repos:
-        raise ValueError("no repos: pick repos on the Run page or add tracked repos")
-    since, until = _window(params)
+        raise ValueError("no repos: pick repos on the Run page, track some, or set GITHUB_ORG")
     mode = params.get("score", "llm")
     summary = {"window": [since, until], "repos": repos, "collect": {}, "failed_repos": {}, "saved": 0, "failed": []}
     if mode == "llm" and not scoring.api_key_present():
@@ -430,9 +453,11 @@ class JobRunner(threading.Thread):
             self.wake.clear()
 
     def schedule(self, db):
-        """Optional recurring refresh (settings.schedule = {enabled, every_hours, months, score})."""
-        s = control.get_setting(db, "schedule") or {}
-        if not s.get("enabled"):
+        """Automatic refresh: collect (and optionally score) on its own, so the data stays current. Runs when the
+        schedule is on (saved in the UI, or switched on by AUTO_REFRESH_HOURS) and GITHUB_TOKEN is set."""
+        import github
+        s = effective_schedule(db)
+        if not s["enabled"] or not github.token_present():
             return
         last = control.get_setting(db, "schedule_last")
         every = max(1, float(s.get("every_hours") or 24)) * 3600
@@ -440,9 +465,15 @@ class JobRunner(threading.Thread):
             return
         if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone():
             return
+        score = s.get("score", "none")
+        if score == "llm" and not scoring.api_key_present():
+            score = "none"                               # never fail a scheduled run just because the key is missing
+        params = {"months": s.get("months", 1), "score": score, "max_usd": s.get("max_usd"), "collect": True}
         if not any(r["enabled"] for r in control.list_tracked(db)):
-            return
-        params = {"months": s.get("months", 1), "score": s.get("score", "llm"), "max_usd": s.get("max_usd")}
+            org = os.environ.get("GITHUB_ORG", "").strip()
+            if not (s.get("all_org") and org):
+                return
+            params["org"] = org
         control.set_setting(db, "schedule_last", time.time(), "scheduler")
         control.create_job(db, "refresh", params, "scheduler")
         db.commit()

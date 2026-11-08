@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements-llm.txt ./
 RUN if [ "$WITH_LLM" = "1" ]; then pip install --no-cache-dir -r requirements-llm.txt; fi
 
-COPY audit.py server.py auth.py jobs.py scoring.py routing.py skill.py control.py github.py store.py schema.sql STANDARDS.md ./
+COPY audit.py envfile.py server.py auth.py jobs.py scoring.py routing.py skill.py control.py github.py store.py schema.sql STANDARDS.md ./
 COPY skills/ ./skills/
 COPY dashboard/ ./dashboard/
 

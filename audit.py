@@ -305,6 +305,8 @@ def cmd_serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=Fals
 
 
 def main():
+    import envfile
+    envfile.load(HERE / ".env")          # settings from .env (real environment variables win)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=os.environ.get("AUDIT_DB") or str(HERE / "audit.db"))
     sub = ap.add_subparsers(dest="cmd", required=True)

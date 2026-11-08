@@ -43,8 +43,15 @@ async function run() {
   let filter = "", recentOnly = true;
   const months = () => Q("#r-period").value === "custom" ? null : +Q("#r-period").value;
   const sinceDate = () => { const m = months(); if (!m) return Q("#r-since").value || "0000-01-01"; const d = new Date(); d.setMonth(d.getMonth() - m); return d.toISOString().slice(0, 10); };
+  const tick = (ok, t, why) => `<span class="pill ${ok ? "ok" : "no"}" title="${E(why)}">${ok ? "✓" : "✗"} ${E(t)}</span>`;
   main().innerHTML = `
+  <div class="card"><div class="row">${tick(st.github_token, "GitHub token", "GITHUB_TOKEN or a .github_token file: needed to collect")}
+    ${tick(st.org, st.org ? "Organisation " + st.org : "GITHUB_ORG", "GITHUB_ORG: lets this page list your repos")}
+    ${tick(st.anthropic_key, "Anthropic key", "ANTHROPIC_API_KEY: only needed for LLM scoring")}
+    ${tick(st.schedule && st.schedule.enabled, st.schedule && st.schedule.enabled ? "Auto-refresh every " + st.schedule.every_hours + "h" : "Auto-refresh off", "Repos tab: keeps data current by itself")}</div>
+    <p class="small muted" style="margin:8px 0 0"><b>How this page works:</b> 1) choose repos, 2) choose how far back to look and whether to score, 3) press <b>Estimate cost</b> to see what it would do, then <b>Start run</b>. Watch it on the <b>Jobs</b> tab. If you only want fresh data and no scoring, choose <i>Don't score, collect only</i>: it is free.</p></div>
   <div class="card"><h3>1 · Pick repositories ${gh.org ? `<span class="muted small">from ${E(gh.org)}</span>` : ""}</h3>
+    ${st.org ? `<label class="chk"><input type="checkbox" id="r-allorg"> or: use <b>every repo of ${E(st.org)}</b> that had activity in the period (no need to pick)</label>` : ""}
     ${gh.error ? `<div class="note bad">${E(gh.error)}. Set <code>GITHUB_TOKEN</code> and <code>GITHUB_ORG</code> on the server, or type repos below.</div>` : ""}
     <div class="row"><input id="r-filter" placeholder="Filter repos…" style="min-width:220px">
       <label class="chk"><input type="checkbox" id="r-recent" checked> only pushed in the period</label>
@@ -93,7 +100,9 @@ async function run() {
     if (Q("#r-period").value === "custom") { p.since = Q("#r-since").value; p.until = Q("#r-until").value; } else p.months = +Q("#r-period").value;
     if (Q("#r-maxprs").value) p.max_prs = +Q("#r-maxprs").value;
     if (Q("#r-maxusd").value) p.max_usd = +Q("#r-maxusd").value;
-    if (!p.repos.length) throw new Error("pick at least one repository");
+    const all = Q("#r-allorg");
+    if (all && all.checked) { delete p.repos; p.org = st.org; }
+    else if (!p.repos.length) throw new Error("pick at least one repository, or tick the 'every repo' box");
     return p;
   };
   Q("#r-filter").oninput = e => { filter = e.target.value.toLowerCase(); draw(); };
@@ -187,20 +196,27 @@ async function repos() {
     <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Repository</th><th class="n">PRs</th><th>Last collected</th><th></th></tr></thead><tbody>
     ${rows.map(r => `<tr><td><b>${E(r.full_name)}</b> ${r.enabled ? "" : bdg("paused")}</td><td class="n">${r.prs}</td><td>${when(r.last_collected_at)}</td>
       <td class="nw"><button data-pause="${E(r.full_name)}" data-en="${r.enabled ? 0 : 1}">${r.enabled ? "Pause" : "Resume"}</button> <button data-rm="${E(r.full_name)}">Remove</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing tracked yet.</td></tr>`}</tbody></table></div></div>
-    <div class="card"><h3>Scheduled refresh</h3><p class="muted small">Runs a collect + score on the tracked repos by itself. Leave it off to run only by hand.</p>
-    <div class="row"><label class="chk"><input type="checkbox" id="s-on" ${sc.enabled ? "checked" : ""}> enabled</label>
-      every <input id="s-every" type="number" min="1" value="${sc.every_hours || 24}" style="width:70px"> hours · last <input id="s-months" type="number" min="1" value="${sc.months || 1}" style="width:60px"> month(s) ·
-      scoring <select id="s-score"><option value="llm" ${sc.score !== "heuristic" && sc.score !== "none" ? "selected" : ""}>LLM</option><option value="heuristic" ${sc.score === "heuristic" ? "selected" : ""}>rule-based</option><option value="none" ${sc.score === "none" ? "selected" : ""}>collect only</option></select>
-      · spend cap $<input id="s-usd" type="number" min="0.01" step="0.01" value="${sc.max_usd || ""}" placeholder="none" style="width:80px"> <button id="s-save">Save</button></div></div>`;
+    <div class="card"><h3>Automatic refresh ${sc.enabled ? bdg("ON", "s-good") : bdg("OFF")}</h3>
+    <p class="muted small">Keeps the data up to date by itself, so you only look at the dashboard. Each run asks GitHub what changed and stores it; it can also score the new PRs.
+    ${sc.source === "environment" ? "Switched on by <code>AUTO_REFRESH_HOURS</code> in the server's .env." : sc.source === "saved" ? "Using the settings saved below." : "Set <code>AUTO_REFRESH_HOURS=6</code> in .env, or turn it on here."}
+    ${sc.enabled ? `Last run: <b>${st.schedule_last ? when(new Date(st.schedule_last * 1000).toISOString()) : "not yet (first run starts about a minute after the server starts)"}</b>${st.schedule_last ? `, next about <b>${when(new Date((st.schedule_last + (sc.every_hours || 24) * 3600) * 1000).toISOString())}</b>` : ""}.` : ""}
+    It needs <code>GITHUB_TOKEN</code>${st.github_token ? "" : " (<b>not set</b>)"}, and either tracked repos above or <code>GITHUB_ORG</code>${st.org ? "" : " (<b>not set</b>)"}.</p>
+    <div class="row"><label class="chk"><input type="checkbox" id="s-on" ${sc.enabled ? "checked" : ""}> on</label>
+      every <input id="s-every" type="number" min="1" value="${sc.every_hours || 6}" style="width:70px"> hours · look back <input id="s-months" type="number" min="1" value="${sc.months || 1}" style="width:60px"> month(s) ·
+      after collecting: <select id="s-score"><option value="none" ${(sc.score || "none") === "none" ? "selected" : ""}>do nothing (free)</option><option value="heuristic" ${sc.score === "heuristic" ? "selected" : ""}>rule-based estimate (free)</option><option value="llm" ${sc.score === "llm" ? "selected" : ""}>score with the LLM</option></select>
+      · spend cap per run $<input id="s-usd" type="number" min="0.01" step="0.01" value="${sc.max_usd || ""}" placeholder="none" style="width:80px"></div>
+    <label class="chk" style="margin-top:6px"><input type="checkbox" id="s-allorg" ${sc.all_org ? "checked" : ""}> if no repos are tracked, refresh <b>every active repo of ${E(st.org || "the organisation (set GITHUB_ORG)")}</b></label>
+    <div class="row" style="margin-top:8px"><button id="s-save" class="primary">Save</button>${sc.source === "saved" ? `<button id="s-env">Go back to the .env setting</button>` : ""}</div></div>`;
   const post = guard(async (b) => { await call("POST", "/api/repos", b); show("repos"); });
   Q("#t-addb").onclick = () => post({full_name: Q("#t-add").value.trim()});
   QA("[data-pause]").forEach(b => b.onclick = () => post({full_name: b.dataset.pause, enabled: !!+b.dataset.en}));
   QA("[data-rm]").forEach(b => b.onclick = guard(async () => { if (confirm(`Stop tracking ${b.dataset.rm}? Collected data stays.`)) { await call("DELETE", "/api/repos/" + b.dataset.rm); show("repos"); } }));
   Q("#t-run").onclick = () => { Admin.preset = rows.filter(r => r.enabled).map(r => r.full_name); show("run"); };
   Q("#s-save").onclick = guard(async () => {
-    await call("PUT", "/api/settings", {schedule: {enabled: Q("#s-on").checked, every_hours: +Q("#s-every").value, months: +Q("#s-months").value, score: Q("#s-score").value, max_usd: Q("#s-usd").value || null}});
-    toast("Schedule saved");
+    await call("PUT", "/api/settings", {schedule: {enabled: Q("#s-on").checked, every_hours: +Q("#s-every").value, months: +Q("#s-months").value, score: Q("#s-score").value, max_usd: Q("#s-usd").value || null, all_org: Q("#s-allorg").checked}});
+    toast("Saved"); show("repos");
   });
+  const envBtn = Q("#s-env"); if (envBtn) envBtn.onclick = guard(async () => { await call("PUT", "/api/settings", {schedule_reset: true}); toast("Using the .env setting again"); show("repos"); });
 }
 
 /* ================================================================== Skill & models */
@@ -208,7 +224,8 @@ async function skillView(tab) {
   tab = typeof tab === "string" ? tab : "routing";
   const [rt, sk] = await Promise.all([call("GET", "/api/routing"), call("GET", "/api/skill")]);
   let rules = JSON.parse(JSON.stringify(rt.rules));
-  let draft = JSON.parse(JSON.stringify(sk.files)), cur = "SKILL.md", dirty = false, tried = null;
+  let draft = JSON.parse(JSON.stringify(sk.files)), cur = "SKILL.md", dirty = false, preview = false;
+  const help = (title, html) => `<details class="card help" open><summary><b>${E(title)}</b></summary><div class="small" style="margin-top:8px;line-height:1.55">${html}</div></details>`;
   const modelOpt = m => Object.entries(rt.models).map(([k, v]) => `<option value="${E(k)}" ${k === m ? "selected" : ""}>${E(k)} — ${E(v.label.replace(/ \(.*/, ""))} ($${v.input}/$${v.output} per M)</option>`).join("");
   const opts = (arr, v) => arr.map(x => `<option ${x === v ? "selected" : ""}>${E(x)}</option>`).join("");
   const shell = () => {
@@ -219,7 +236,11 @@ async function skillView(tab) {
 
   function routingTab() {
     const tri = v => v === true ? "yes" : v === false ? "no" : "";
-    Q("#sv").innerHTML = `<div class="card"><h3>Which model scores which PR</h3>
+    Q("#sv").innerHTML = help("What is this page? Do I need to change anything?", `Every pull request is sent to one AI model to be scored. <b>This list decides which model</b>, so small, routine PRs use a cheap model and big or risky ones a stronger one.
+      <ul><li><b>Opus</b> is the strongest and costs the most. <b>Sonnet</b> is the balanced middle. <b>Haiku</b> is the cheapest.</li>
+      <li>The rules are read from the top. <b>The first rule that fits the PR is used</b>; the last rule (no conditions) catches everything else.</li>
+      <li><b>You don't have to change anything</b>: the defaults are sensible. To spend less, switch a rule to a cheaper model. For more care on a project, add a rule with its repo name above the others.</li>
+      <li>Use <b>Test</b> at the bottom to see which rule a PR of a given size would hit. Changes apply to the next run only.</li></ul>`) + `<div class="card"><h3>Which model scores which PR</h3>
       <p class="muted small">Rules are checked top to bottom; the <b>first match wins</b>. The last rule must have no conditions: it is the default. Cheaper models for small or routine PRs, Opus for the risky ones.
       ${rt.custom ? bdg("customised", "s-ok") : bdg("defaults")}</p>
       <div id="rules"></div>
@@ -259,18 +280,24 @@ async function skillView(tab) {
   function skillTab() {
     const names = Object.keys(draft).sort((a, b) => a === "SKILL.md" ? -1 : b === "SKILL.md" ? 1 : a.localeCompare(b));
     if (!draft[cur]) cur = "SKILL.md";
-    Q("#sv").innerHTML = `<div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Scoring skill ${bdg(sk.hash, sk.source === "edited" ? "s-ok" : "s-good")} <span class="small muted">${sk.source === "edited" ? "edited version in use" : "repo default in use"}</span></h3>
+    Q("#sv").innerHTML = help("What is the skill? Should I edit it?", `The <b>skill</b> is the set of written instructions the AI follows when it scores a PR. It is made of a few text files:
+      <ul><li><b>SKILL.md</b>: how to work through a PR and the output rules.</li><li><b>rubric.md</b>: what “good” means: the standards and the weights of each score.</li>
+      <li><b>agents/…</b>: the different “reviewers”. <i>scorer</i> reads the PR in one go; <i>deep-scorer</i> reads big or sensitive PRs file by file.</li></ul>
+      <b>Leave it alone</b> unless you want scores to follow different standards. If you do edit: change one thing, press <b>Preview</b> to read it nicely, <b>Save as new version</b>, then check it on the <b>Try on a PR</b> tab first.
+      Saving never re-scores old PRs by itself, and you can always go back to the shipped version.`) + `<div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Scoring skill ${bdg(sk.hash, sk.source === "edited" ? "s-ok" : "s-good")} <span class="small muted">${sk.source === "edited" ? "edited version in use" : "repo default in use"}</span></h3>
       <span class="small muted">${dirty ? "unsaved changes" : ""}</span></div>
       <p class="muted small"><b>SKILL.md</b> is the procedure, <b>rubric.md</b> the standards, and each <b>agents/*.md</b> defines a scorer (front matter: mode <code>single</code> or <code>agentic</code>, effort, max_turns, max_diff_chars). Which agent and model run for a PR is chosen on <b>Models & routing</b>. Saving makes a new version; existing scores keep the version that made them.</p>
       <div class="split"><div class="files">${names.map(n => `<button data-f="${E(n)}" class="${n === cur ? "on" : ""}">${E(n)}</button>`).join("")}
         <button id="sk-addag">+ Add agent</button>${cur.startsWith("agents/") && cur !== "agents/scorer.md" ? `<button id="sk-delag" class="danger">Delete ${E(cur.split("/")[1])}</button>` : ""}</div>
-        <div style="flex:1;min-width:0"><textarea id="sk-ed" class="ed" spellcheck="false">${E(draft[cur])}</textarea></div></div>
+        <div style="flex:1;min-width:0"><div class="row" style="margin-bottom:6px"><button id="sk-prev">${preview ? "Edit" : "Preview"}</button><span class="small muted">${preview ? "Showing how it reads (Markdown)" : "Editing the text"}</span></div>
+          ${preview ? `<div class="card inner mdv" style="max-height:520px;overflow:auto">${md(draft[cur])}</div>` : `<textarea id="sk-ed" class="ed" spellcheck="false">${E(draft[cur])}</textarea>`}</div></div>
       <div class="row" style="margin-top:10px"><input id="sk-note" placeholder="What did you change? (optional)" style="flex:1;min-width:220px"><button id="sk-save" class="primary">Save as new version</button><button id="sk-reset">Back to repo version</button></div></div>
       <div class="card"><h3>Versions</h3><table><thead><tr><th>Version</th><th>Saved</th><th>By</th><th>Note</th><th></th></tr></thead><tbody>
         <tr><td><code>${E(sk.repo_hash)}</code> ${sk.hash === sk.repo_hash ? bdg("in use", "s-good") : ""}</td><td>repo files</td><td></td><td>shipped with the app</td><td><button data-load="${E(sk.repo_hash)}">Load in editor</button></td></tr>
         ${sk.versions.map(v => `<tr><td><code>${E(v.hash)}</code> ${v.hash === sk.hash ? bdg("in use", "s-good") : ""}</td><td class="nw">${when(v.created_at)}</td><td>${E(v.created_by || "")}</td><td>${E(v.note || "")}</td>
           <td class="nw"><button data-load="${E(v.hash)}">Load in editor</button> ${v.hash === sk.hash ? "" : `<button data-act="${E(v.hash)}">Make active</button>`}</td></tr>`).join("")}</tbody></table></div>`;
-    Q("#sk-ed").oninput = e => { draft[cur] = e.target.value; dirty = true; };
+    const ed = Q("#sk-ed"); if (ed) ed.oninput = e => { draft[cur] = e.target.value; dirty = true; };
+    Q("#sk-prev").onclick = () => { preview = !preview; skillTab(); };
     QA("[data-f]").forEach(b => b.onclick = () => { cur = b.dataset.f; skillTab(); });
     Q("#sk-addag").onclick = () => { const n = (prompt("Agent name (lowercase letters, digits, dashes):") || "").trim();
       if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(n)) { if (n) toast("use lowercase letters, digits and dashes", true); return; }
@@ -284,7 +311,8 @@ async function skillView(tab) {
 
   async function tryTab() {
     const meta = await call("GET", "/api/meta");
-    Q("#sv").innerHTML = `<div class="card"><h3>Try the skill on one PR</h3><p class="muted small">Scores one already-collected PR and shows the result next to the stored score. Nothing is saved. Tick the box to use the text currently in the editor (unsaved) and compare it with the active version. This calls the API, so it costs a little.</p>
+    Q("#sv").innerHTML = help("What does this do?", `Tests the scoring on <b>one</b> PR so you can see what the AI would say before you use it on everything. Pick a project and PR number (the PR must already be collected) and press <b>Score it</b>. It shows the result next to the score already stored. <b>Nothing is saved</b>, and it costs only a few cents.
+      If you tick the box, it uses the text from the editor on the previous tab even though you haven't saved it, and compares it with the version in use.`) + `<div class="card"><h3>Try the skill on one PR</h3><p class="muted small">Scores one already-collected PR and shows the result next to the stored score. Nothing is saved. Tick the box to use the text currently in the editor (unsaved) and compare it with the active version. This calls the API, so it costs a little.</p>
       <div class="row"><select id="tr-repo">${meta.repos.map(r => `<option>${E(r)}</option>`).join("")}</select> PR # <input id="tr-n" type="number" min="1" style="width:90px">
         <select id="tr-model"><option value="">model: by routing rules</option>${Object.keys(rt.models).map(m => `<option>${E(m)}</option>`).join("")}</select>
         <select id="tr-agent"><option value="">agent: by routing rules</option>${rt.agents.map(a => `<option>${E(a)}</option>`).join("")}</select>

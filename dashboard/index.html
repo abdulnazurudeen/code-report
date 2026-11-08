@@ -70,6 +70,11 @@ td.nw{white-space:nowrap}
 ul.tp{margin:0;padding-left:18px} ul.tp li{margin:4px 0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-2);padding:1px 5px;border-radius:5px}
 pre.std{white-space:pre-wrap;font-size:12.5px}
+.mdv{line-height:1.55} .mdv h2{font-size:20px;margin:18px 0 8px} .mdv h3{font-size:16px;margin:16px 0 6px} .mdv h4,.mdv h5,.mdv h6{font-size:14px;margin:12px 0 4px}
+.mdv p{margin:8px 0} .mdv ul,.mdv ol{margin:8px 0;padding-left:22px} .mdv li{margin:3px 0}
+.mdv table.md{margin:10px 0;font-size:13px;display:block;overflow:auto} .mdv table.md th{cursor:default}
+.mdv pre.code{background:var(--panel-2);padding:10px;border-radius:8px;overflow:auto;font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+.mdv blockquote{margin:10px 0;padding:4px 12px;border-left:3px solid var(--border);color:var(--muted)} .mdv hr{border:none;border-top:1px solid var(--border);margin:14px 0}
 svg text{fill:var(--muted);font-size:11px}
 [hidden]{display:none !important}
 .ctl{display:contents}
@@ -83,6 +88,8 @@ body.kiosk{font-size:16px} body.kiosk main{padding:28px}
 .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px} .field input,.field select{width:100%}
 label.chk{display:flex;gap:8px;align-items:center;font-size:13px;margin:4px 0;color:var(--text)} label.chk input{width:auto}
 .scroll{overflow:auto}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12.5px;font-weight:600} .pill.ok{background:var(--good-soft);color:var(--good)} .pill.no{background:var(--bad-soft);color:var(--bad)}
+details.help{background:var(--accent-soft);border-color:transparent} details.help summary{cursor:pointer}
 .note{padding:8px 10px;border-radius:8px;background:var(--ok-soft);color:var(--ok);margin:8px 0} .note.bad{background:var(--bad-soft);color:var(--bad)}
 .card.inner{background:var(--panel-2);box-shadow:none;margin:10px 0}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button.primary:hover{filter:brightness(.95);background:var(--accent)}
@@ -132,6 +139,38 @@ const badge = v => `<span class="badge ${cls(v)}">${fmt(v)}</span>`;
 const d10 = s => s ? s.slice(0,10) : "–";
 const initials = u => (u.name || u.login || "?").replace(/[^A-Za-z ]/g," ").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase() || "?";
 const label = u => u.login || u.name || u.uid;
+// Small, safe Markdown renderer (headings, lists, tables, code, quotes, bold/italic/links). Text is escaped first.
+function md(src){
+  const inline = t => esc(t).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/|#)[^)\s]*|[\w./-]+)\)/g, (m, a, b) => `<a href="${b}" target="_blank" rel="noopener">${a}</a>`);
+  const lines = String(src).replace(/\r/g, "").split("\n"), out = [], LI = /^\s*([-*]|\d+\.)\s+/, TR = /^\s*\|.*\|\s*$/;
+  let i = 0, m;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^```/.test(l)) { const buf = []; i++; while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]); i++; out.push(`<pre class="code">${esc(buf.join("\n"))}</pre>`); continue; }
+    if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { const n = Math.min(6, m[1].length + 1); out.push(`<h${n}>${inline(m[2])}</h${n}>`); i++; continue; }
+    if (/^\s*(---+|\*\*\*+)\s*$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (TR.test(l) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const head = cells(l), rows = []; i += 2;
+      while (i < lines.length && TR.test(lines[i])) rows.push(cells(lines[i++]));
+      out.push(`<table class="md"><thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`); continue;
+    }
+    if (LI.test(l)) {
+      const ord = /^\s*\d+\./.test(l), items = [];
+      while (i < lines.length && LI.test(lines[i])) { let t = lines[i++].replace(LI, ""); while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !LI.test(lines[i])) t += " " + lines[i++].trim(); items.push(t); }
+      const tag = ord ? "ol" : "ul"; out.push(`<${tag}>${items.map(t => `<li>${inline(t)}</li>`).join("")}</${tag}>`); continue;
+    }
+    if (/^>\s?/.test(l)) { const buf = []; while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, "")); out.push(`<blockquote>${inline(buf.join(" "))}</blockquote>`); continue; }
+    if (!l.trim()) { i++; continue; }
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>)/.test(lines[i]) && !LI.test(lines[i]) && !TR.test(lines[i])) buf.push(lines[i++]);
+    if (!buf.length) buf.push(lines[i++]);
+    out.push(`<p>${inline(buf.join(" "))}</p>`);
+  }
+  return out.join("");
+}
 const S = {team: [], user: null, sort: {key: "prs", dir: -1}, tab: "prs"};
 
 function range(){
@@ -353,7 +392,7 @@ $("#dashBtn").onclick = () => refresh();
 $("#out").onclick = async () => { await fetch("/auth/logout", {method: "POST", credentials: "same-origin", headers: {"X-Requested-With": "audit"}}); location.href = "/login"; };
 $("#stdBtn").onclick = async () => {
   const t = await fetch(location.origin + "/api/standards", {credentials: "same-origin"}).then(r => r.text());
-  $("#drawer").innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Review standards</h2><button id="close">✕</button></div><pre class="std">${esc(t)}</pre>`;
+  $("#drawer").innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Review standards</h2><button id="close">✕</button></div><div class="mdv">${md(t)}</div>`;
   $("#drawer").classList.add("open"); $("#scrim").classList.add("open"); $("#close").onclick = closePr;
 };
 boot();
