@@ -4,7 +4,9 @@
                    process, risky patterns in the diff). It cannot judge logic, so code_quality is an estimate
                    capped at 4 and every result is marked engine="heuristic" in the dashboard.
   anthropic-api  - the same review the Claude Code agents do, through the Anthropic API with ANTHROPIC_API_KEY
-                   (pay per use, needs `pip install -r requirements-llm.txt`). Good for unattended/scheduled runs.
+                   (pay per use, needs `pip install -r requirements-llm.txt`). Instructions come from the scoring skill
+                   (skills/pr-scoring/); routing.py picks model / effort / agent per PR. Modes: one streamed
+                   call (single), an investigating tool loop (agentic), or the Batches API (half price).
 
 Both return an evaluation dict in the STANDARDS.md JSON contract, ready for store.save_evaluation().
 """
@@ -199,8 +201,14 @@ def heuristic_eval(b, diff=None):
 
 
 # ------------------------------------------------------------------ Anthropic API (LLM, no Claude Code needed)
+import skill, routing                                  # noqa: E402
+
 DEFAULT_MODEL = "claude-opus-5-5"
 MAX_LLM_DIFF_CHARS = 600_000          # ~150k tokens; larger diffs are cut and the model is told so
+AGENTIC_HEAD_CHARS = 20_000           # an investigating agent starts with only the head of the diff + a file list
+BATCH_MAX_TOKENS = 32_000
+SINGLE_MAX_TOKENS = 64_000
+AGENTIC_MAX_TOKENS = 16_000
 
 _INT15 = {"type": "integer", "enum": [1, 2, 3, 4, 5]}
 _NSTR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
@@ -210,6 +218,7 @@ def _obj(props, required=None):
     return {"type": "object", "properties": props, "required": required or list(props), "additionalProperties": False}
 
 
+# The importer depends on this shape (store.save_evaluation), so it lives in code, not in the editable skill.
 EVAL_SCHEMA = _obj({
     "scores": _obj({"commit_msg": _INT15, "code_quality": _INT15, "validation": _INT15, "review_response": _INT15}),
     "tests_added": {"type": "boolean"},
@@ -237,60 +246,237 @@ EVAL_SCHEMA = _obj({
     "talking_points": {"type": "array", "items": {"type": "string"}},
 })
 
-SYSTEM_INTRO = """You are an independent senior code reviewer auditing one pull request for an engineering-quality audit.
-You receive a JSON bundle: PR metadata, CI status, commits, reviews, review threads, conversation, rework candidates and the diff.
-Score it strictly against the rubric below and return only the JSON object the output schema describes.
 
-Rules the importer depends on:
-- One `threads` entry per bundle thread, comment_id copied exactly. Reviewer `login` exactly as in the bundle.
-- Confirm or reject every rework candidate from the diffs; record confirmed ones on this (fixing) PR.
-- shared_pr true: a `contributors` entry for every human in `people` with commits (AI co-authors such as claude,
-  cursoragent, copilot are bots - never list them); put author + commit_sha on each code issue.
-- CI: the bundle has only the overall status, not which check failed - say so, don't guess.
-- Open, never-reviewed PR -> review_response 3. Merged with no approval before the merge -> 2.
-- Every score below 4 cites concrete evidence (file:line, commit SHA or comment). Talking points are kind and specific.
+def api_key_present():
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
-RUBRIC (STANDARDS.md):
-"""
+
+def sdk_installed():
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _client(client=None):
+    if client is not None:
+        return client
+    import anthropic                                   # optional dependency: pip install -r requirements-llm.txt
+    return anthropic.Anthropic(max_retries=4)
+
+
+def prepare_bundle(b, diff, max_chars):
+    bundle = dict(b)
+    bundle.pop("instructions", None)
+    cut = len(diff) > max_chars
+    bundle["diff"] = diff[:max_chars]
+    bundle["diff_truncated"] = cut
+    if cut:
+        bundle["diff_note"] = (f"Diff is {len(diff)} chars; only the first {max_chars} are included. "
+                               "Say so in the summary and judge what is visible.")
+    return bundle
+
+
+def build_params(b, diff, route, files, max_tokens=SINGLE_MAX_TOKENS):
+    """Messages API parameters for one PR (shared by the streamed call, the batch and the cost estimate).
+    route = {model, effort, agent}."""
+    a = skill.agents(files)[route["agent"]]
+    head = AGENTIC_HEAD_CHARS if a["mode"] == "agentic" else a["max_diff_chars"]
+    bundle = prepare_bundle(b, diff, head)
+    if a["mode"] == "agentic":
+        bundle["diff_note"] = ("Only the start of the diff is included. Use list_changed_files, read_file_diff and "
+                               "search_diff to read the rest before you score.")
+        bundle["changed_files"] = [{"path": p, "diff_chars": len(t)} for p, t in split_diff(diff).items()][:400]
+    return dict(
+        model=route["model"], max_tokens=max_tokens,
+        system=[{"type": "text", "text": skill.system_prompt(files, route["agent"]),
+                 "cache_control": {"type": "ephemeral"}}],          # identical for every PR -> cached
+        messages=[{"role": "user", "content": "PR bundle:\n" + json.dumps(bundle, ensure_ascii=False)}],
+        output_config={"effort": route["effort"], "format": {"type": "json_schema", "schema": EVAL_SCHEMA}})
+
+
+def _usage(msg):
+    u = msg.usage
+    return {"input": getattr(u, "input_tokens", 0) or 0, "output": getattr(u, "output_tokens", 0) or 0,
+            "cache_read": getattr(u, "cache_read_input_tokens", 0) or 0,
+            "cache_write": getattr(u, "cache_creation_input_tokens", 0) or 0}
+
+
+def _add(total, usage):
+    for k, v in usage.items():
+        total[k] = total.get(k, 0) + v
+
+
+def parse_message(msg, b, route, skill_hash, usage=None, batch=False):
+    """Final assistant message -> evaluation dict for store.save_evaluation. Raises RuntimeError on refusal/cut-off."""
+    if msg.stop_reason == "refusal":
+        raise RuntimeError(f"model declined: {getattr(getattr(msg, 'stop_details', None), 'category', None)}")
+    if msg.stop_reason == "max_tokens":
+        raise RuntimeError("output hit max_tokens")
+    text = next((blk.text for blk in msg.content if blk.type == "text"), None)
+    if text is None:
+        raise RuntimeError("model returned no text")
+    ev = json.loads(text)
+    usage = usage or _usage(msg)
+    model = getattr(msg, "model", None) or route["model"]
+    ev.update({"engine": "anthropic-api", "repo": b["repo"], "number": b["number"], "head_sha": b["head_sha"],
+               "model": model, "agent": route["agent"], "skill_hash": skill_hash, "usage": usage,
+               "cost_usd": routing.cost_usd(route["model"], usage, batch)})
+    return ev
+
+
+def _stream(client, params):
+    fallbacks = routing.catalog()["models"].get(params["model"], {}).get("fallbacks") and os.environ.get("AUDIT_FALLBACKS", "1") != "0"
+    if fallbacks:      # if a safety classifier declines (e.g. a security-heavy diff), the API retries on a fallback model
+        with client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params) as s:
+            return s.get_final_message()
+    with client.messages.stream(**params) as s:
+        return s.get_final_message()
+
+
+# ---- agentic mode: the model reads the diff with tools
+def split_diff(diff):
+    parts, cur, buf = {}, None, []
+    for line in diff.splitlines(keepends=True):
+        m = re.match(r"diff --git a/.*? b/(.*)$", line.rstrip("\n"))
+        if m:
+            if cur is not None:
+                parts[cur] = "".join(buf)
+            cur, buf = m.group(1), [line]
+        elif cur is not None:
+            buf.append(line)
+    if cur is not None:
+        parts[cur] = "".join(buf)
+    return parts
+
+
+TOOLS = [
+    {"name": "list_changed_files", "description": "List every file in the PR diff with its diff size in characters.",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "read_file_diff", "description": "Read the unified diff of one file. Long diffs come in pages of 30000 characters; pass offset to continue.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}},
+                      "required": ["path"], "additionalProperties": False}},
+    {"name": "search_diff", "description": "Regex search over the added lines of the whole diff. Returns up to 40 matches as path:line: text.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False}},
+]
+PAGE = 30_000
+
+
+def run_tool(name, args, files_by_path):
+    """Execute one tool call. Returns (text, is_error). Inputs are validated: the model may send anything."""
+    if not isinstance(args, dict):
+        return "arguments must be an object", True
+    if name == "list_changed_files":
+        return json.dumps([{"path": p, "diff_chars": len(t)} for p, t in files_by_path.items()][:1000]), False
+    if name == "read_file_diff":
+        path, off = args.get("path"), args.get("offset", 0)
+        if not isinstance(path, str) or not isinstance(off, int) or isinstance(off, bool) or off < 0:
+            return "need path (string) and optional offset (integer >= 0)", True
+        if path not in files_by_path:
+            return f"no such file in the diff: {path!r}", True
+        text = files_by_path[path]
+        chunk = text[off:off + PAGE]
+        more = f"\n[showing {off}-{off + len(chunk)} of {len(text)}; call again with offset={off + len(chunk)}]" if off + PAGE < len(text) else ""
+        return chunk + more, False
+    if name == "search_diff":
+        pat = args.get("pattern")
+        if not isinstance(pat, str) or not pat or len(pat) > 300:
+            return "need a pattern (string, up to 300 characters)", True
+        try:
+            rx = re.compile(pat, re.I)
+        except re.error as e:
+            return f"bad regex: {e}", True
+        hits = []
+        for p, t in files_by_path.items():
+            for n, line in enumerate(t.splitlines(), 1):
+                if line.startswith("+") and not line.startswith("+++") and rx.search(line):
+                    hits.append(f"{p}:{n}: {line[1:200]}")
+                    if len(hits) >= 40:
+                        return "\n".join(hits) + "\n[stopped at 40 matches]", False
+        return "\n".join(hits) or "no matches", False
+    return f"unknown tool {name!r}", True
+
+
+def _agentic(b, diff, route, files, skill_hash, client):
+    a = skill.agents(files)[route["agent"]]
+    params = build_params(b, diff, route, files, max_tokens=AGENTIC_MAX_TOKENS)
+    params["tools"] = TOOLS
+    by_path = split_diff(diff)
+    messages, total, turns = list(params.pop("messages")), {}, 0
+    while True:
+        msg = client.messages.create(messages=messages, **params)
+        _add(total, _usage(msg))
+        if msg.stop_reason != "tool_use":
+            return parse_message(msg, b, route, skill_hash, usage=total)
+        turns += 1
+        if turns > a["max_turns"] + 2:
+            raise RuntimeError("agent kept calling tools after its turn budget")
+        messages.append({"role": "assistant", "content": msg.content})
+        results = []
+        for blk in msg.content:
+            if blk.type != "tool_use":
+                continue
+            if turns > a["max_turns"]:
+                text, err = "Investigation budget used up. Answer now with the final JSON only.", False
+            else:
+                text, err = run_tool(blk.name, blk.input, by_path)
+            results.append({"type": "tool_result", "tool_use_id": blk.id, "content": text[:PAGE + 200], **({"is_error": True} if err else {})})
+        messages.append({"role": "user", "content": results})
+
+
+def score_pr(b, diff, route, files=None, skill_hash=None, client=None):
+    """Score one PR with the Anthropic API. route = {model, effort, agent}; files = skill files (default: the repo's).
+    Returns an evaluation dict (engine='anthropic-api') with usage and cost_usd. SDK errors propagate."""
+    if files is None:
+        files = skill.repo_files()
+        skill_hash = skill_hash or skill.version_hash(files)
+    client = _client(client)
+    if skill.agents(files)[route["agent"]]["mode"] == "agentic":
+        return _agentic(b, diff, route, files, skill_hash, client)
+    msg = _stream(client, build_params(b, diff, route, files))
+    return parse_message(msg, b, route, skill_hash)
 
 
 def llm_eval(b, diff, model=None, effort=None, client=None):
-    """Score one bundle with the Anthropic API. Raises RuntimeError on refusal/truncation; SDK errors propagate."""
-    import anthropic                                   # optional dependency: pip install -r requirements-llm.txt
-    client = client or anthropic.Anthropic(max_retries=4)
-    model = model or os.environ.get("AUDIT_MODEL", DEFAULT_MODEL)
-    bundle = dict(b)
-    bundle.pop("instructions", None)
-    if len(diff) > MAX_LLM_DIFF_CHARS:
-        bundle["diff"] = diff[:MAX_LLM_DIFF_CHARS]
-        bundle["diff_note"] = (f"Diff is {len(diff)} chars; only the first {MAX_LLM_DIFF_CHARS} are included. "
-                               "Say so in the summary and judge what is visible.")
-    else:
-        bundle["diff"] = diff
-    bundle["diff_truncated"] = len(diff) > MAX_LLM_DIFF_CHARS
-    system = [{"type": "text", "text": SYSTEM_INTRO + (HERE / "STANDARDS.md").read_text(encoding="utf-8"),
-               "cache_control": {"type": "ephemeral"}}]           # rubric is identical for every PR -> cached
-    params = dict(
-        model=model, max_tokens=64000, system=system,
-        messages=[{"role": "user", "content": "PR bundle:\n" + json.dumps(bundle, ensure_ascii=False)}],
-        output_config={"effort": effort or os.environ.get("AUDIT_EFFORT", "high"),
-                       "format": {"type": "json_schema", "schema": EVAL_SCHEMA}},
-    )
-    if os.environ.get("AUDIT_FALLBACKS", "1") != "0":
-        # if a safety classifier declines (e.g. a security-heavy diff), the API retries on a fallback model
-        with client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **params) as s:
-            msg = s.get_final_message()
-    else:
-        with client.messages.stream(**params) as s:
-            msg = s.get_final_message()
-    if msg.stop_reason == "refusal":
-        raise RuntimeError(f"model declined: {getattr(msg.stop_details, 'category', None)}")
-    if msg.stop_reason == "max_tokens":
-        raise RuntimeError("output hit max_tokens")
-    text = next(blk.text for blk in msg.content if blk.type == "text")
-    ev = json.loads(text)
-    ev.update({"engine": "anthropic-api", "repo": b["repo"], "number": b["number"], "head_sha": b["head_sha"]})
-    usage = msg.usage
-    ev["_usage"] = {"input": usage.input_tokens, "output": usage.output_tokens,
-                    "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0}
-    return ev
+    """Compatibility wrapper: score with the repo's default skill and one model."""
+    return score_pr(b, diff, {"model": model or os.environ.get("AUDIT_MODEL", DEFAULT_MODEL),
+                              "effort": effort or os.environ.get("AUDIT_EFFORT", "high"), "agent": "scorer"}, client=client)
+
+
+# ---- Message Batches API (half price, asynchronous)
+BATCH_CHUNK = 500
+
+
+def batch_submit(client, items):
+    """items: [{custom_id, params}] (params from build_params with max_tokens=BATCH_MAX_TOKENS). Returns batch ids."""
+    ids = []
+    for i in range(0, len(items), BATCH_CHUNK):
+        chunk = items[i:i + BATCH_CHUNK]
+        ids.append(client.messages.batches.create(requests=[{"custom_id": it["custom_id"], "params": it["params"]} for it in chunk]).id)
+    return ids
+
+
+def batch_status(client, batch_id):
+    b = client.messages.batches.retrieve(batch_id)
+    c = b.request_counts
+    return b.processing_status, {k: getattr(c, k, 0) for k in ("processing", "succeeded", "errored", "canceled", "expired")}
+
+
+def batch_results(client, batch_id, metas, skill_hash):
+    """Yield (custom_id, evaluation | None, error | None). metas[custom_id] = {bundle, route}."""
+    for r in client.messages.batches.results(batch_id):
+        m = metas.get(r.custom_id)
+        if m is None:
+            continue
+        if r.result.type != "succeeded":
+            yield r.custom_id, None, f"batch result: {r.result.type}" + (f" ({getattr(r.result.error, 'type', '')})" if r.result.type == "errored" else "")
+            continue
+        try:
+            yield r.custom_id, parse_message(r.result.message, m["bundle"], m["route"], skill_hash, batch=True), None
+        except Exception as e:                                       # one bad result must not lose the rest
+            yield r.custom_id, None, f"{type(e).__name__}: {e}"[:300]
+
+
+def batch_cancel(client, batch_id):
+    client.messages.batches.cancel(batch_id)

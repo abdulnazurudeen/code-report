@@ -17,6 +17,11 @@ def load_token(token_file=None):
         raise SystemExit("No GitHub token. Put it in .github_token next to audit.py, or set GITHUB_TOKEN.")
 
 
+def token_present():
+    """True if a GitHub token is configured (env var or .github_token). Never returns the token itself."""
+    return bool(os.environ.get("GITHUB_TOKEN", "").strip()) or Path(__file__).with_name(".github_token").exists()
+
+
 class GitHub:
     def __init__(self, token):
         self.token = token
@@ -58,7 +63,7 @@ class GitHub:
             if not batch:
                 return out
             out += [{"full_name": r["full_name"], "pushed_at": r["pushed_at"], "default_branch": r["default_branch"],
-                     "archived": r["archived"], "fork": r["fork"]} for r in batch]
+                     "archived": r["archived"], "fork": r["fork"], "private": r.get("private", False)} for r in batch]
             page += 1
 
     def pr_diff(self, full_name, number):

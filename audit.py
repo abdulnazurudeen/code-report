@@ -12,12 +12,14 @@
   python audit.py collect  --org myorg --months 3              # collect every repo pushed in the period
   python audit.py people                                       # identity check: who is who, unlinked emails
   python audit.py score    --engine heuristic --months 3       # score pending PRs, rule-based, no LLM / token
-  python audit.py score    --engine anthropic --months 3       # score pending PRs via ANTHROPIC_API_KEY
+  python audit.py score    --engine llm --collect --repos o/a  # collect, then score via ANTHROPIC_API_KEY (routing + skill)
+  python audit.py score    --engine llm --estimate             # what would be scored, and the estimated cost
   python audit.py backup   --out audit-backup.db               # consistent copy of the database
-Environment: AUDIT_DB, GITHUB_TOKEN, HOST, PORT, DASHBOARD_PASSWORD / DASHBOARD_USERS, AUDIT_READONLY=1,
-             ANTHROPIC_API_KEY, AUDIT_MODEL, AUDIT_EFFORT (see README.md).
+Environment: AUDIT_DB, GITHUB_TOKEN, GITHUB_ORG, ANTHROPIC_API_KEY, HOST, PORT, PUBLIC_URL, GITHUB_OAUTH_CLIENT_ID /
+             GITHUB_OAUTH_CLIENT_SECRET, AUDIT_SESSION_SECRET, ADMIN_USERS, VIEWER_USERS, VIEWER_PASSWORD,
+             DASHBOARD_USERS / DASHBOARD_PASSWORD (basic login = admin), AUDIT_READONLY=1 (see README.md).
 """
-import argparse, datetime, json, os, sys, http.server, urllib.parse, threading, webbrowser
+import argparse, datetime, json, os, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -96,6 +98,7 @@ def collect(db, gh, full_name, since, until):
             store.upsert_comment(db, pr_id, {"host_id": f"ic{c['databaseId']}", "kind": "conversation",
                                              "author_uid": store.actor_uid(db, c["author"]), "body": c["body"],
                                              "created_at": c["createdAt"]})
+        db.commit()     # per PR: the web app's other writers (jobs, settings) must not wait for a whole repo
     if repo_id is None:
         repo_id = store.upsert_repo(db, full_name)
     default_branch = db.execute("SELECT default_branch FROM repos WHERE id=?", (repo_id,)).fetchone()[0]
@@ -150,7 +153,7 @@ def make_bundle(db, pr_id, diff_text, gh=None):
         "WHERE rl.pr_id=?", (pr_id,))]
     truncated = len(diff_text) > MAX_DIFF_CHARS
     return {
-        "instructions": "Evaluate against STANDARDS.md. Write the result JSON to evals/<same file name>.",
+        "instructions": "Evaluate against skills/pr-scoring/rubric.md. Write the result JSON to evals/<same file name>.",
         "repo": p["repo"], "number": p["number"], "head_sha": p["head_sha"], "url": p["url"],
         "title": p["title"], "body": p["body"], "author": p["author_login"], "state": p["state"],
         "base_branch": p["base_branch"], "head_branch": p.get("head_branch"),
@@ -177,39 +180,26 @@ def make_bundle(db, pr_id, diff_text, gh=None):
     }
 
 
-def cmd_score(db, args):
-    """Score pending PRs without a Claude Code session: rule-based (free) or via the Anthropic API (API key)."""
-    import github, scoring
-    store.backfill_contributions(db)
+def cmd_score(db, args, db_path=None):
+    """Score pending PRs from the command line with the same pipeline the web app runs as a job:
+    rule-based (free, no LLM) or the Anthropic API (ANTHROPIC_API_KEY, routing + skill from skills/pr-scoring)."""
+    import control, jobs
+    repos = [parse_repo(r) for r in args.repos] if args.repos else [r[0] for r in db.execute("SELECT full_name FROM repos")]
+    params = {"repos": repos, "months": args.months, "since": args.since, "until": args.until, "collect": args.collect,
+              "score": "llm" if args.engine in ("anthropic", "llm") else "heuristic", "max_prs": args.limit or None,
+              "max_usd": args.max_usd, "batch": args.batch}
+    if args.estimate:
+        print(json.dumps(jobs.estimate(db, params), indent=1))
+        return
+    job_id = control.create_job(db, "refresh", params, "cli")
     db.commit()
-    since, until = window(args)
-    llm = args.engine == "anthropic"
-    todo = store.prs_needing_evaluation(db, since, until, [parse_repo(r) for r in args.repos] if args.repos else None,
-                                        replace_heuristic=llm)
-    gh = github.GitHub(github.load_token())
-    report = {"engine": args.engine, "window": [since, until], "pending": len(todo), "saved": 0, "failed": [],
-              "tokens": {"input": 0, "output": 0, "cache_read": 0}}
-    for row in todo[: args.limit or None]:
-        diff = gh.pr_diff(row["full_name"], row["number"])
-        bundle = make_bundle(db, row["id"], diff, gh)
-        label = f"{row['full_name']}#{row['number']}"
-        try:
-            ev = scoring.llm_eval(bundle, diff) if llm else scoring.heuristic_eval(bundle, diff)
-        except Exception as e:                       # keep going; one bad PR must not stop a scheduled run
-            report["failed"].append({"pr": label, "error": f"{type(e).__name__}: {e}"[:300]})
-            continue
-        for k, v in (ev.pop("_usage", None) or {}).items():
-            report["tokens"][k] += v
-        ok, msg = store.save_evaluation(db, ev)
-        if ok:
-            report["saved"] += 1
-            db.commit()
-        else:
-            report["failed"].append({"pr": label, "error": msg})
-        print(f"{label}: {'saved' if ok else msg}", flush=True)
-    store.log_run(db, f"score:{args.engine}", [], since, until, report)
-    db.commit()
-    print(json.dumps(report, indent=1))
+    jobs.JobRunner(db_path or args.db).execute(db, job_id)
+    job = control.get_job(db, job_id)
+    for e in job["events"]:
+        print(f"{e['ts'][11:19]} {e['level']:5} {e['message']}")
+    print(json.dumps({"status": job["status"], "error": job["error"], "cost_usd": job["cost_usd"], **(job["summary"] or {})}, indent=1))
+    if job["status"] == "failed":
+        raise SystemExit(1)
 
 
 def cmd_backup(db_path, out):
@@ -308,100 +298,10 @@ def cmd_status(db, args):
                       "commits": db.execute("SELECT count(*) FROM commits").fetchone()[0]}, indent=1))
 
 
-# ------------------------------------------------------------------ dashboard server
-def load_users():
-    """Dashboard logins from DASHBOARD_USERS="alice:pw1,bob:pw2" or DASHBOARD_PASSWORD (user "admin")."""
-    users = {}
-    for pair in filter(None, (os.environ.get("DASHBOARD_USERS") or "").split(",")):
-        name, _, pw = pair.strip().partition(":")
-        if name and pw:
-            users[name] = pw
-    if os.environ.get("DASHBOARD_PASSWORD"):
-        users.setdefault(os.environ.get("DASHBOARD_USER", "admin"), os.environ["DASHBOARD_PASSWORD"])
-    return users
-
-
+# ------------------------------------------------------------------ dashboard server (see server.py)
 def cmd_serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, public=False):
-    import base64, hmac
-    users = load_users()
-    local = host in ("127.0.0.1", "localhost", "::1")
-    if not users and not local and not public:
-        raise SystemExit("Refusing to serve on a network address without a login: the dashboard shows people's scores "
-                         "and security findings. Set DASHBOARD_PASSWORD (or DASHBOARD_USERS), or pass --public.")
-    if not Path(db_path).exists():
-        raise SystemExit(f"Database not found: {db_path}")
-
-    class H(http.server.BaseHTTPRequestHandler):
-        server_version = "pr-audit"
-        sys_version = ""
-
-        def log_message(self, fmt, *a):
-            if not local:                                # keep an access log when hosted
-                sys.stderr.write(f"{self.address_string()} {fmt % a}\n")
-
-        def send(self, code, body, ctype="application/json", extra=None):
-            data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Cache-Control", "no-store")
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(data)
-
-        def authorised(self):
-            if not users:
-                return True
-            h = self.headers.get("Authorization", "")
-            if h.startswith("Basic "):
-                try:
-                    name, _, pw = base64.b64decode(h[6:]).decode("utf-8").partition(":")
-                except ValueError:
-                    return False
-                return name in users and hmac.compare_digest(users[name].encode(), pw.encode())
-            return False
-
-        def do_GET(self):
-            u = urllib.parse.urlparse(self.path)
-            if u.path == "/healthz":                     # for load balancers / container health checks
-                return self.send(200, {"ok": True})
-            if not self.authorised():
-                return self.send(401, {"error": "login required"}, extra={"WWW-Authenticate": 'Basic realm="PR audit"'})
-            q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
-            since, until, repo = q.get("since", "0000-00-00"), q.get("until", "9999-12-31"), q.get("repo") or None
-            db = store.connect(db_path, readonly=readonly)
-            try:
-                if u.path in ("/", "/index.html"):
-                    return self.send(200, (HERE / "dashboard" / "index.html").read_bytes(), "text/html; charset=utf-8")
-                if u.path == "/api/meta":
-                    return self.send(200, store.meta(db))
-                if u.path == "/api/team":
-                    return self.send(200, store.team(db, since, until, repo))
-                if u.path.startswith("/api/user/"):
-                    d = store.user_detail(db, urllib.parse.unquote(u.path[10:]), since, until, repo)
-                    return self.send(200 if d else 404, d or {"error": "not found"})
-                if u.path.startswith("/api/pr/"):
-                    d = store.pr_detail(db, int(u.path[8:]))
-                    return self.send(200 if d else 404, d or {"error": "not found"})
-                if u.path == "/api/standards":
-                    return self.send(200, (HERE / "STANDARDS.md").read_bytes(), "text/plain; charset=utf-8")
-                self.send(404, {"error": "not found"})
-            except (ValueError, KeyError):
-                self.send(400, {"error": "bad request"})
-            finally:
-                db.close()
-
-    srv = http.server.ThreadingHTTPServer((host, port), H)
-    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}"
-    print(f"Dashboard running at {url}  (listening on {host}; login {'on, ' + str(len(users)) + ' user(s)' if users else 'off'}"
-          f"{'; read-only' if readonly else ''})  - Ctrl+C to stop", flush=True)
-    if open_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    srv.serve_forever()
+    import server
+    server.serve(db_path, port, open_browser, host, readonly, public)
 
 
 def main():
@@ -430,11 +330,15 @@ def main():
     s.add_argument("--readonly", action="store_true", default=os.environ.get("AUDIT_READONLY") == "1",
                    help="open the database read-only (hosted dashboard)")
     s.add_argument("--public", action="store_true", help="allow a network address without a login (not recommended)")
-    sc = sub.add_parser("score", help="score pending PRs without Claude Code")
-    sc.add_argument("--engine", choices=["heuristic", "anthropic"], default="heuristic",
-                    help="heuristic = rule-based, free, no LLM; anthropic = LLM review via ANTHROPIC_API_KEY")
+    sc = sub.add_parser("score", help="score pending PRs (optionally collect first) without Claude Code")
+    sc.add_argument("--engine", choices=["heuristic", "anthropic", "llm"], default="heuristic",
+                    help="heuristic = rule-based, free, no LLM; anthropic/llm = LLM review via ANTHROPIC_API_KEY")
     sc.add_argument("--repos", nargs="+"); sc.add_argument("--months", type=int, default=3)
     sc.add_argument("--since"); sc.add_argument("--until"); sc.add_argument("--limit", type=int, default=0)
+    sc.add_argument("--collect", action="store_true", help="pull the repos from GitHub first")
+    sc.add_argument("--batch", action="store_true", help="Message Batches API: half price, results within hours")
+    sc.add_argument("--max-usd", type=float, default=None, help="stop once this much has been spent")
+    sc.add_argument("--estimate", action="store_true", help="only print what would be scored and the estimated cost")
     b = sub.add_parser("backup", help="consistent copy of the database"); b.add_argument("--out", required=True)
     m = sub.add_parser("merge-users"); m.add_argument("from_uid"); m.add_argument("into_uid")
     args = ap.parse_args()
@@ -470,7 +374,7 @@ def main():
     elif args.cmd == "pending":
         cmd_pending(db, args)
     elif args.cmd == "score":
-        cmd_score(db, args)
+        cmd_score(db, args, args.db)
     elif args.cmd == "diff":
         import github
         # full diff (bundles hold the capped copy); raw UTF-8 so Windows consoles don't choke on non-ASCII

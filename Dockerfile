@@ -1,9 +1,9 @@
-# PR & code-review audit - dashboard + CLI in one small image (Python standard library only).
-#   docker build -t pr-audit .                       # dashboard + rule-based scoring (no LLM)
-#   docker build -t pr-audit --build-arg WITH_LLM=1 .  # also the Anthropic API scorer
+# PR & code-review audit - the web app (dashboard + admin + background worker) in one small image.
+#   docker build -t pr-audit .                          # includes the Anthropic SDK (LLM scoring)
+#   docker build -t pr-audit --build-arg WITH_LLM=0 .   # rule-based scoring only, standard library only
 FROM python:3.12-slim
 
-ARG WITH_LLM=0
+ARG WITH_LLM=1
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     AUDIT_DB=/data/audit.db HOST=0.0.0.0 PORT=8765
 
@@ -11,7 +11,8 @@ WORKDIR /app
 COPY requirements-llm.txt ./
 RUN if [ "$WITH_LLM" = "1" ]; then pip install --no-cache-dir -r requirements-llm.txt; fi
 
-COPY audit.py github.py store.py scoring.py schema.sql STANDARDS.md ./
+COPY audit.py server.py auth.py jobs.py scoring.py routing.py skill.py control.py github.py store.py schema.sql STANDARDS.md ./
+COPY skills/ ./skills/
 COPY dashboard/ ./dashboard/
 
 RUN useradd --create-home --uid 10001 audit && mkdir -p /data && chown audit:audit /data

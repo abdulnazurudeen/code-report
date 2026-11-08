@@ -11,7 +11,9 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def connect(path, readonly=False):
+def connect(path, readonly=False, migrate=True):
+    """migrate=False: plain connection for per-request use once the server has migrated at start-up
+    (skips the schema script, which would otherwise take a write lock on every request)."""
     if readonly:                                  # hosted dashboard: never writes, never migrates
         db = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=30, check_same_thread=False)
         db.row_factory = sqlite3.Row
@@ -19,8 +21,11 @@ def connect(path, readonly=False):
     db = sqlite3.connect(path, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
-    # PERSIST journal: never deletes files, so it also works on synced/mounted folders
+    # PERSIST journal: never deletes files, so it also works on synced/mounted folders. It is a per-connection
+    # setting, so every connection (not only the migrating one) must ask for it.
     db.execute("PRAGMA journal_mode = PERSIST")
+    if not migrate:
+        return db
     db.executescript(SCHEMA.read_text(encoding="utf-8"))
     cols = {r[1] for r in db.execute("PRAGMA table_info(pull_requests)")}
     for col, ddl in (("head_branch", "TEXT"), ("kind", "TEXT DEFAULT 'change'"), ("merged_by_uid", "TEXT"), ("activity_at", "TEXT")):
@@ -29,6 +34,11 @@ def connect(path, readonly=False):
     if "engine" not in {r[1] for r in db.execute("PRAGMA table_info(pr_evaluations)")}:
         # who produced the score: claude-code (agent session), anthropic-api, or heuristic (no LLM)
         db.execute("ALTER TABLE pr_evaluations ADD COLUMN engine TEXT DEFAULT 'claude-code'")
+    ev_cols = {r[1] for r in db.execute("PRAGMA table_info(pr_evaluations)")}
+    for col, ddl in (("model", "TEXT"), ("agent", "TEXT"), ("skill_hash", "TEXT"),
+                     ("input_tokens", "INTEGER"), ("output_tokens", "INTEGER"), ("cost_usd", "REAL")):
+        if col not in ev_cols:                   # which model/agent/skill version produced a score, and what it cost
+            db.execute(f"ALTER TABLE pr_evaluations ADD COLUMN {col} {ddl}")
     db.execute("DROP VIEW IF EXISTS v_pr")
     db.executescript(SCHEMA.read_text(encoding="utf-8").split("-- Latest evaluation for the PR")[1].split("\n", 1)[1])
     db.execute("INSERT INTO meta VALUES ('rubric_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -315,17 +325,20 @@ def log_run(db, kind, repos, since, until, stats):
 ENGINES = ("claude-code", "anthropic-api", "heuristic")
 
 
-def prs_needing_evaluation(db, since, until, repos=None, replace_heuristic=False):
+def prs_needing_evaluation(db, since, until, repos=None, replace_heuristic=False, skill_hash=None):
     """PRs with no evaluation for their current code. replace_heuristic=True also returns PRs that only
-    have a rule-based (no-LLM) score, so an LLM run can upgrade them."""
-    q = ("SELECT p.id, p.number, p.head_sha, r.full_name FROM pull_requests p JOIN repos r ON r.id=p.repo_id "
+    have a rule-based (no-LLM) score, so an LLM run can upgrade them. skill_hash=<current> also returns PRs
+    the API engine scored with a different version of the scoring skill (an explicit "re-score" request)."""
+    q = ("SELECT p.id, p.number, p.head_sha, r.full_name, p.additions, p.deletions, p.changed_files "
+         "FROM pull_requests p JOIN repos r ON r.id=p.repo_id "
          "JOIN users u ON u.uid=p.author_uid "
          "LEFT JOIN pr_evaluations e ON e.pr_id=p.id AND e.head_sha=p.head_sha AND e.rubric_version=? "
          "WHERE (e.pr_id IS NULL OR NOT EXISTS (SELECT 1 FROM pr_contributions pc WHERE pc.pr_id=p.id "
          "  AND pc.head_sha=p.head_sha AND pc.rubric_version=e.rubric_version)"
-         + (" OR e.engine='heuristic'" if replace_heuristic else "") +
+         + (" OR e.engine='heuristic'" if replace_heuristic else "")
+         + (" OR (e.engine='anthropic-api' AND COALESCE(e.skill_hash,'') != ?)" if skill_hash else "") +
          ") AND u.is_bot=0 AND COALESCE(p.kind,'change')='change' AND substr(COALESCE(p.activity_at, p.created_at),1,10) BETWEEN ? AND ?")
-    args = [RUBRIC_VERSION, since, until]
+    args = [RUBRIC_VERSION, *([skill_hash] if skill_hash else []), since, until]
     if repos:
         q += f" AND r.full_name IN ({','.join('?' * len(repos))})"
         args += list(repos)
@@ -361,16 +374,20 @@ def save_evaluation(db, ev):
         return False, f"unknown engine {engine!r}"
     db.execute("INSERT INTO pr_evaluations (pr_id, head_sha, rubric_version, commit_msg, code_quality, validation, "
                "review_response, overall, tests_added, commit_notes, validation_notes, code_issues, summary, talking_points, "
-               "evaluated_at, engine) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+               "evaluated_at, engine, model, agent, skill_hash, input_tokens, output_tokens, cost_usd) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                "ON CONFLICT(pr_id, head_sha, rubric_version) DO UPDATE SET commit_msg=excluded.commit_msg, "
                "code_quality=excluded.code_quality, validation=excluded.validation, review_response=excluded.review_response, "
                "overall=excluded.overall, tests_added=excluded.tests_added, commit_notes=excluded.commit_notes, "
                "validation_notes=excluded.validation_notes, code_issues=excluded.code_issues, summary=excluded.summary, "
-               "talking_points=excluded.talking_points, evaluated_at=excluded.evaluated_at, engine=excluded.engine",
+               "talking_points=excluded.talking_points, evaluated_at=excluded.evaluated_at, engine=excluded.engine, "
+               "model=excluded.model, agent=excluded.agent, skill_hash=excluded.skill_hash, "
+               "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, cost_usd=excluded.cost_usd",
                (pr_id, sha, RUBRIC_VERSION, s["commit_msg"], s["code_quality"], s["validation"], s["review_response"],
                 overall(s), int(bool(ev.get("tests_added"))), ev.get("commit_notes"), ev.get("validation_notes"),
                 json.dumps(ev.get("code_issues", [])), ev.get("summary"), json.dumps(ev.get("talking_points", [])), now(),
-                engine))
+                engine, ev.get("model"), ev.get("agent"), ev.get("skill_hash"),
+                (ev.get("usage") or {}).get("input"), (ev.get("usage") or {}).get("output"), ev.get("cost_usd")))
     save_contributions(db, pr_id, sha, contrib)
     for t in ev.get("threads", []):
         db.execute("INSERT INTO thread_evaluations VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO UPDATE SET "
@@ -599,4 +616,40 @@ def pr_detail(db, pr_id):
                                     "WHERE rl.original_pr=? AND rl.confirmed=1", (pr_id,)))
     p["fixes"] = rows(db.execute("SELECT rl.kind, rl.evidence, rl.confirmed, o.id, o.number, o.title FROM rework_links rl "
                                  "JOIN pull_requests o ON o.id=rl.original_pr WHERE rl.pr_id=? AND rl.confirmed=1", (pr_id,)))
+    return p
+
+
+# ---------------------------------------------------------------- "self" view: one person sees only their own data
+def pr_access(db, pr_id, uid):
+    """How much of a PR a person may see: 'full' (owner / committer / co-author), 'reviewer' (only reviewed it), or None."""
+    if not db.execute("SELECT 1 FROM pull_requests WHERE id=?", (pr_id,)).fetchone():
+        return None
+    if any(d["uid"] == uid for d in pr_people(db, pr_id)):
+        return "full"
+    if db.execute("SELECT 1 FROM reviews WHERE pr_id=? AND reviewer_uid=?", (pr_id, uid)).fetchone():
+        return "reviewer"
+    return None
+
+
+def redact_pr_for_self(db, p, uid, access):
+    """Strip what a person may not see of other people's evaluation: their scores, notes and reviewer ratings.
+    'reviewer' access (they only reviewed it) keeps just the PR header and their own reviewer assessment."""
+    mine = db.execute("SELECT COALESCE(login,name) FROM users WHERE uid=?", (uid,)).fetchone()
+    me = (mine[0] if mine else None)
+    p = dict(p)
+    p["reviewer_evals"] = [r for r in p.get("reviewer_evals", []) if r["reviewer"] == me]
+    if access == "reviewer":
+        keep = ("id", "repo", "number", "title", "url", "state", "kind", "author_login", "created_at", "merged_at",
+                "closed_at", "additions", "deletions", "changed_files", "ci_status", "engine", "head_branch", "base_branch",
+                "reviewer_evals", "merged_by", "model")
+        out = {k: p.get(k) for k in keep}
+        out.update({"redacted": True, "people": [], "commits": [], "threads": [], "reviews": [], "conversation": [],
+                    "code_issues": [], "talking_points": [], "fixed_by": [], "fixes": [], "overall": None})
+        return out
+    for x in p.get("people", []):
+        if x["login"] != me:                    # other committers' scores and notes are theirs, not yours
+            for k in ("commit_msg", "code_quality", "validation", "review_response", "overall", "notes"):
+                x[k] = None
+    # issues traced to someone else's commits stay visible only without their name being scored
+    p["redacted"] = False
     return p

@@ -1,0 +1,19 @@
+{
+  "_comment": "Prices are USD per million tokens (see https://docs.claude.com pricing) and only feed the cost estimate; edit when prices change. Cache writes are estimated at 1.25x input.",
+  "efforts": ["low", "medium", "high", "xhigh", "max"],
+  "models": {
+    "claude-opus-5-5":   {"label": "Opus 5.5 (deepest, highest cost)", "input": 4.00, "output": 20.00, "cache_read": 0.20, "fallbacks": true},
+    "claude-sonnet-5-5": {"label": "Sonnet 5.5 (balanced)",            "input": 2.00, "output": 10.00, "cache_read": 0.20, "fallbacks": false},
+    "claude-haiku-5-5":  {"label": "Haiku 5.5 (fast, cheapest)",       "input": 0.10, "output": 0.50,  "cache_read": 0.01, "input_long": 0.50, "output_long": 2.50, "long_over": 100000, "fallbacks": false}
+  },
+  "output_tokens_by_effort": {"low": 2500, "medium": 4000, "high": 6000, "xhigh": 9000, "max": 12000},
+  "default_rules": [
+    {"name": "Security-sensitive paths", "when": {"path_regex": "(^|/)(auth|payment|payments|crypto|secret|secrets|token|tokens|login|password|oauth)"},
+     "agent": "deep-scorer", "model": "claude-opus-5-5", "effort": "high"},
+    {"name": "Heavy PRs (800+ lines)",   "when": {"min_lines": 800},  "agent": "scorer", "model": "claude-opus-5-5",   "effort": "high"},
+    {"name": "Shared PRs",               "when": {"shared": true},    "agent": "scorer", "model": "claude-opus-5-5",   "effort": "high"},
+    {"name": "Diff was truncated",       "when": {"truncated": true}, "agent": "scorer", "model": "claude-opus-5-5",   "effort": "high"},
+    {"name": "Small PRs (120 lines or less)", "when": {"max_lines": 120}, "agent": "scorer", "model": "claude-haiku-5-5", "effort": "high"},
+    {"name": "Everything else",          "when": {},                  "agent": "scorer", "model": "claude-sonnet-5-5", "effort": "high"}
+  ]
+}

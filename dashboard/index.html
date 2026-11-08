@@ -71,12 +71,35 @@ ul.tp{margin:0;padding-left:18px} ul.tp li{margin:4px 0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-2);padding:1px 5px;border-radius:5px}
 pre.std{white-space:pre-wrap;font-size:12.5px}
 svg text{fill:var(--muted);font-size:11px}
+[hidden]{display:none !important}
+.ctl{display:contents}
+body.admin-view .layout,body.self .layout,body.kiosk .layout{grid-template-columns:1fr}
+body.admin-view aside,body.self aside,body.kiosk aside,body.kiosk .ctl,body.kiosk #nav{display:none}
+body.kiosk{font-size:16px} body.kiosk main{padding:28px}
+#nav{display:flex;gap:4px} #nav[hidden]{display:none} #nav button.on{background:var(--accent-soft);border-color:var(--accent)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:8px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px} .field input,.field select{width:100%}
+label.chk{display:flex;gap:8px;align-items:center;font-size:13px;margin:4px 0;color:var(--text)} label.chk input{width:auto}
+.scroll{overflow:auto}
+.note{padding:8px 10px;border-radius:8px;background:var(--ok-soft);color:var(--ok);margin:8px 0} .note.bad{background:var(--bad-soft);color:var(--bad)}
+.card.inner{background:var(--panel-2);box-shadow:none;margin:10px 0}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button.primary:hover{filter:brightness(.95);background:var(--accent)}
+button.danger{color:var(--bad)} button:disabled{opacity:.45;cursor:default}
+.toast{position:fixed;right:16px;bottom:16px;max-width:420px;background:var(--text);color:var(--bg);padding:10px 14px;border-radius:10px;z-index:30;box-shadow:var(--shadow)} .toast.bad{background:var(--bad);color:#fff}
+pre.log{white-space:pre-wrap;max-height:320px;overflow:auto;font-size:12px;background:var(--panel-2);padding:10px;border-radius:8px}
+textarea.ed{width:100%;min-height:440px;font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text)}
+.split{display:flex;gap:14px;align-items:flex-start} .files{display:flex;flex-direction:column;gap:4px;min-width:170px} .files button{text-align:left} .files button.on{background:var(--accent-soft);border-color:var(--accent)}
+progress{accent-color:var(--accent)}
+@media (max-width:900px){.split{flex-direction:column}.files{flex-direction:row;flex-wrap:wrap}}
 @media (max-width:900px){.layout{grid-template-columns:1fr} aside{position:static;max-height:none;border-right:none;border-bottom:1px solid var(--border)} .grid2{grid-template-columns:1fr} header .meta{margin-left:0}}
 </style>
 </head>
 <body>
 <header>
   <h1>Code Review Audit</h1>
+  <span class="ctl">
   <select id="period" aria-label="Period">
     <option value="1">Last 1 month</option><option value="3" selected>Last 3 months</option>
     <option value="6">Last 6 months</option><option value="12">Last 12 months</option>
@@ -86,7 +109,13 @@ svg text{fill:var(--muted);font-size:11px}
   <select id="repo" aria-label="Project"><option value="">All projects</option></select>
   <button id="teamBtn">Team overview</button>
   <button id="stdBtn">Standards</button>
+  </span>
+  <nav id="nav" hidden>
+    <button id="dashBtn">Dashboard</button><button data-admin="run">Run</button><button data-admin="jobs">Jobs</button><button data-admin="repos">Repos</button>
+    <button data-admin="skill">Skill &amp; models</button><button data-admin="access">Access</button>
+  </nav>
   <span class="meta" id="meta"></span>
+  <span class="small muted" id="who"></span><button id="out" hidden>Sign out</button>
 </header>
 <div class="layout">
   <aside><input id="q" placeholder="Search people…" aria-label="Search people"><div id="users"></div></aside>
@@ -115,16 +144,35 @@ function range(){
 function qs(){ const r = range(); return `since=${r.since}&until=${r.until}&repo=${encodeURIComponent($("#repo").value)}`; }
 // location.origin never carries user:password, so fetch works however the page was opened; the browser
 // re-sends the Basic login it already has for this origin
-const api = p => fetch(location.origin + p, {credentials: "same-origin"}).then(r => r.ok ? r.json() : null);
+const api = p => fetch(location.origin + p, {credentials: "same-origin"}).then(r => { if (r.status === 401) { location.href = "/login"; return null; } return r.ok ? r.json() : null; });
+let ME = {role: "viewer"};
+const params = new URLSearchParams(location.search), KIOSK = params.get("kiosk") === "1";
 
 async function boot(){
+  ME = await api("/api/me"); if (!ME) return;
+  document.body.classList.toggle("kiosk", KIOSK);
+  document.body.classList.toggle("self", ME.role === "self");
+  $("#who").textContent = `${ME.name || ME.login} · ${ME.role}`;
+  if (ME.source === "github" || ME.source === "viewer") $("#out").hidden = false;
+  if (ME.role === "self") { S.user = ME.uid; $("#teamBtn").hidden = true; }
+  if (ME.role === "admin" && !KIOSK) {
+    $("#nav").hidden = false;
+    const sc = document.createElement("script"); sc.src = "/admin.js"; document.head.appendChild(sc);
+    document.querySelectorAll("[data-admin]").forEach(b => b.onclick = () => Admin.show(b.dataset.admin));
+  }
   const m = await api("/api/meta");
   for (const r of m.repos) $("#repo").insertAdjacentHTML("beforeend", `<option>${esc(r)}</option>`);
-  $("#meta").textContent = `Data ${m.first ? d10(m.first)+" → "+d10(m.last) : "empty"} · last sync ${m.last_run ? d10(m.last_run) : "never"} · ${m.pending_eval} PRs awaiting evaluation · rubric ${m.rubric_version}${m.engines&&m.engines.heuristic?` · ${m.engines.heuristic} rule-based estimates`:""}`;
+  $("#meta").textContent = `Data ${m.first ? d10(m.first)+" → "+d10(m.last) : "empty"} · last sync ${m.last_run ? d10(m.last_run) : "never"} ${m.pending_eval != null ? ` · ${m.pending_eval} PRs awaiting evaluation` : ""} · rubric ${m.rubric_version}${m.engines&&m.engines.heuristic?` · ${m.engines.heuristic} rule-based estimates`:""}`;
   const h = new URLSearchParams(location.hash.slice(1));
-  if (h.get("user")) S.user = h.get("user");
-  refresh();
+  if (h.get("user") && ME.role !== "self") S.user = h.get("user");
+  await refresh();
+  if (KIOSK) {                                    // office TV: keep it fresh, optionally cycle through people (?rotate=20 seconds)
+    setInterval(refresh, 5 * 60 * 1000);
+    const rot = +params.get("rotate");
+    if (rot) { let i = -1; setInterval(() => { if (!S.team.length) return; i = (i + 1) % (S.team.length + 1); if (i === S.team.length) showTeam(); else { S.user = S.team[i].uid; renderUsers(); showUser(S.user); } }, rot * 1000); }
+  }
 }
+function leaveAdmin(){ if (window.Admin && Admin.stop) Admin.stop(); document.body.classList.remove("admin-view"); document.querySelectorAll("[data-admin]").forEach(b => b.classList.remove("on")); }
 async function refresh(){
   S.team = await api(`/api/team?${qs()}`) || [];
   renderUsers();
@@ -154,6 +202,7 @@ function wire(container, rows, onClick, rerender){
 }
 
 function showTeam(){
+  leaveAdmin();
   S.user = null; history.replaceState(null, "", location.pathname); renderUsers();
   const cols = [
     {k:"login", t:"Person", f:u => `<b>${esc(label(u))}</b>`}, {k:"prs", t:"PRs owned", n:1}, {k:"contributed", t:"Shared PRs", n:1, f:u => u.contributed||0},
@@ -187,6 +236,7 @@ function trendSvg(t){
 }
 
 async function showUser(uid){
+  leaveAdmin();
   const d = await api(`/api/user/${encodeURIComponent(uid)}?${qs()}`);
   if (!d) { $("#main").innerHTML = `<div class="empty">User not found</div>`; return; }
   const s = d.summary || {}, u = d.user;
@@ -239,6 +289,14 @@ const valCls = {valid:"s-good", nitpick:"s-na", invalid:"s-bad"};
 const resCls = {fixed_in_code:"s-good", explained:"s-good", dismissed:"s-bad", open:"s-ok"};
 async function openPr(id){
   const p = await api(`/api/pr/${id}`); if (!p) return;
+  if (p.redacted) {                               // you only reviewed this PR: the author's scores are not yours to see
+    $("#drawer").innerHTML = `<div style="display:flex;justify-content:space-between;gap:10px"><div><div class="small muted">${esc(p.repo)} · #${p.number} · by ${esc(p.author_login)}</div>
+      <h2 style="margin:4px 0 8px;font-size:18px">${esc(p.title)}</h2></div><button id="close" aria-label="Close">✕</button></div>
+      <div class="card"><b>You reviewed this pull request.</b> Its scores belong to its author, so only your reviewer assessment is shown. ${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>` : ""}</div>
+      ${p.reviewer_evals.length ? `<div class="card"><h3>Your review</h3>${p.reviewer_evals.map(r => `<div class="issue">${badge(r.score)}<div>${esc(r.notes)}${r.missed.length ? `<div class="small">Missed: ${r.missed.map(esc).join("; ")}</div>` : ""}</div></div>`).join("")}</div>` : `<div class="card small muted">No assessment of your review yet.</div>`}`;
+    $("#drawer").scrollTop = 0; $("#drawer").classList.add("open"); $("#scrim").classList.add("open"); $("#close").onclick = closePr;
+    return;
+  }
   const sc = [["commit_msg","Commits"],["code_quality","Code"],["validation","Validation"],["review_response","Review response"],["overall","Overall"]];
   $("#drawer").innerHTML = `
     <div style="display:flex;justify-content:space-between;gap:10px"><div>
@@ -253,7 +311,7 @@ async function openPr(id){
     ${p.kind==="promotion" ? `<div class="card"><b>Branch promotion</b> (${esc(p.head_branch)} → ${esc(p.base_branch)}). It carries changes already reviewed in their own PRs, so it isn't scored.</div>` : p.overall==null ? `<div class="card"><b>Not evaluated yet</b> for the current code version.</div>` : `
     <div class="card"><div style="display:flex;gap:14px;flex-wrap:wrap">${sc.map(([k,l])=>`<div><div class="small muted">${l}</div>${badge(p[k])}</div>`).join("")}</div>
       <p style="margin:12px 0 0">${esc(p.summary)}</p>
-      <p class="small muted" style="margin:8px 0 0">${p.engine==="heuristic"?"⚠ Rule-based estimate (no LLM): code quality reflects pattern checks only, not a reading of the logic.":p.engine==="anthropic-api"?"Scored by Claude via the Anthropic API.":"Scored by Claude (agent review)."}</p></div>
+      <p class="small muted" style="margin:8px 0 0">${p.engine==="heuristic"?"⚠ Rule-based estimate (no LLM): code quality reflects pattern checks only, not a reading of the logic.":p.engine==="anthropic-api"?`Scored by Claude via the Anthropic API${p.model ? ` (${esc(p.model)}${p.agent ? `, ${esc(p.agent)} agent` : ""}${p.skill_hash ? `, skill ${esc(p.skill_hash)}` : ""})` : ""}.`:"Scored by Claude (agent review)."}</p></div>
     ${p.talking_points.length?`<div class="card"><h3>1:1 talking points</h3><ul class="tp">${p.talking_points.map(t=>`<li>${esc(t)}</li>`).join("")}</ul></div>`:""}
     ${p.people.length>1?`<div class="card"><h3>Who answers for what</h3><div style="overflow:auto">
       <table><thead><tr><th>Person</th><th>Role</th><th class="n">Commits</th><th class="n">Lines</th><th class="n">Commit msgs</th><th class="n">Code</th><th class="n">Validation</th><th class="n">Review resp.</th><th class="n">Their score</th></tr></thead><tbody>
@@ -291,6 +349,8 @@ $("#period").onchange = () => { $("#custom").style.display = $("#period").value=
 $("#since").onchange = $("#until").onchange = $("#repo").onchange = refresh;
 $("#q").oninput = renderUsers;
 $("#teamBtn").onclick = () => showTeam();
+$("#dashBtn").onclick = () => refresh();
+$("#out").onclick = async () => { await fetch("/auth/logout", {method: "POST", credentials: "same-origin", headers: {"X-Requested-With": "audit"}}); location.href = "/login"; };
 $("#stdBtn").onclick = async () => {
   const t = await fetch(location.origin + "/api/standards", {credentials: "same-origin"}).then(r => r.text());
   $("#drawer").innerHTML = `<div style="display:flex;justify-content:space-between"><h2 style="margin:0">Review standards</h2><button id="close">✕</button></div><pre class="std">${esc(t)}</pre>`;

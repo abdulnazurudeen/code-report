@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Code Review Audit</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--border:#e2e5ea;--text:#1b1f24;--muted:#5d6672;--accent:#2f5bd3;--bad:#c23934}
+@media (prefers-color-scheme: dark){:root{--bg:#0f1216;--panel:#171b21;--border:#2a313b;--text:#e6e9ee;--muted:#98a2b0;--accent:#7aa2ff;--bad:#f07570}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.card{width:min(420px,calc(100vw - 32px));background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:28px}
+h1{font-size:20px;margin:0 0 4px} p{color:var(--muted);margin:0 0 20px}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:11px 14px;border-radius:9px;border:1px solid var(--border);background:var(--panel);color:var(--text);font:inherit;font-weight:600;cursor:pointer;text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:hover{filter:brightness(.96)}
+hr{border:none;border-top:1px solid var(--border);margin:22px 0}
+label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}
+input[type=password]{width:100%;padding:10px 12px;border-radius:9px;border:1px solid var(--border);background:var(--panel);color:var(--text);font:inherit;margin-bottom:10px}
+.chk{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:13px;margin:0 0 12px}
+#err{color:var(--bad);min-height:1.3em;margin-top:10px;font-size:14px}
+.small{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Code Review Audit</h1>
+  <p>Sign in to see pull-request and code-review scores.</p>
+  <div id="gh" hidden>
+    <a class="btn primary" href="/auth/login">Sign in with GitHub</a>
+    <div class="small" style="margin-top:8px">You see your own work. Admins and viewers are set up by your administrator.</div>
+  </div>
+  <hr id="sep" hidden>
+  <form id="vf" hidden>
+    <label for="pw">Viewer password (shared screens)</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <label class="chk"><input id="kiosk" type="checkbox" checked> TV mode: auto-refresh, no controls</label>
+    <button class="btn" type="submit">Open as viewer</button>
+  </form>
+  <div id="none" class="small" hidden>No sign-in method is configured on this server. Set GitHub OAuth or VIEWER_PASSWORD (see the README).</div>
+  <div id="err" role="alert"></div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+fetch("/auth/config").then(r => r.json()).then(c => {
+  $("#gh").hidden = !c.oauth; $("#vf").hidden = !c.viewer_password; $("#sep").hidden = !(c.oauth && c.viewer_password);
+  $("#none").hidden = c.oauth || c.viewer_password;
+});
+$("#vf").onsubmit = async e => {
+  e.preventDefault(); $("#err").textContent = "";
+  const r = await fetch("/auth/viewer", {method: "POST", credentials: "same-origin",
+    headers: {"X-Requested-With": "audit", "Content-Type": "application/json"}, body: JSON.stringify({password: $("#pw").value})});
+  if (r.ok) { location.href = $("#kiosk").checked ? "/?kiosk=1" : "/"; return; }
+  const d = await r.json().catch(() => ({}));
+  $("#err").textContent = d.error || "Could not sign in";
+};
+</script>
+</body>
+</html>

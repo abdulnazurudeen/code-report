@@ -1,7 +1,7 @@
-# docker compose up -d                      -> dashboard on http://<host>:8765 (login from .env)
-# docker compose run --rm refresh           -> pull new GitHub activity and score it (rule-based, no LLM)
-# docker compose run --rm refresh-llm       -> same, scored by the Anthropic API (needs ANTHROPIC_API_KEY)
-# The database lives in ./data/audit.db on the host - copy your existing audit.db there before the first start.
+# docker compose up -d --build   -> the app on http://<host>:8765 (sign-in as configured in .env)
+# Collect and score from the UI (Run page). One-off from a terminal if you prefer:
+#   docker compose exec dashboard python audit.py score --engine llm --collect --repos org/repo --months 3 --max-usd 5
+# The database lives in ./data/audit.db on the host - copy an existing audit.db there before the first start (optional).
 services:
   dashboard:
     build: .
@@ -14,31 +14,3 @@ services:
       PORT: "8765"
     volumes:
       - ./data:/data
-
-  refresh:
-    image: pr-audit
-    profiles: ["jobs"]
-    env_file: .env
-    volumes:
-      - ./data:/data
-    entrypoint: ["sh", "-c"]
-    command:
-      - python audit.py collect --org "$${GITHUB_ORG}" --months "$${AUDIT_MONTHS:-3}" &&
-        python audit.py score --engine heuristic --months "$${AUDIT_MONTHS:-3}" &&
-        python audit.py status
-
-  refresh-llm:
-    build:
-      context: .
-      args:
-        WITH_LLM: "1"
-    image: pr-audit-llm
-    profiles: ["jobs"]
-    env_file: .env
-    volumes:
-      - ./data:/data
-    entrypoint: ["sh", "-c"]
-    command:
-      - python audit.py collect --org "$${GITHUB_ORG}" --months "$${AUDIT_MONTHS:-3}" &&
-        python audit.py score --engine anthropic --months "$${AUDIT_MONTHS:-3}" &&
-        python audit.py status

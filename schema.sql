@@ -176,12 +176,66 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 
+-- ===== Application / control-plane tables (the web app: settings, who may log in, background jobs) =====
+-- Non-secret settings only (model routing, limits, schedule). API keys and tokens live in environment variables.
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY, value TEXT, updated_at TEXT, updated_by TEXT
+);
+
+-- Repos the admin chose to keep up to date.
+CREATE TABLE IF NOT EXISTS tracked_repos (
+  full_name         TEXT PRIMARY KEY,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  added_by          TEXT, added_at TEXT,
+  last_collected_at TEXT
+);
+
+-- Maps a login (GitHub account / email) to a person in `users` and a role: admin | viewer | self.
+CREATE TABLE IF NOT EXISTS app_users (
+  id         INTEGER PRIMARY KEY,
+  gh_id      INTEGER,
+  gh_login   TEXT COLLATE NOCASE,
+  email      TEXT COLLATE NOCASE,
+  name       TEXT,
+  role       TEXT NOT NULL DEFAULT 'self',
+  uid        TEXT,                                -- users.uid this person's data lives under (self view)
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT, created_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_app_users_gh_id    ON app_users(gh_id)    WHERE gh_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_app_users_gh_login ON app_users(gh_login) WHERE gh_login IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_app_users_email    ON app_users(email)    WHERE email IS NOT NULL;
+
+-- Background work started from the UI (collect + score, try-on-PR). status: queued|running|done|failed|cancelled
+CREATE TABLE IF NOT EXISTS jobs (
+  id               INTEGER PRIMARY KEY,
+  kind             TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'queued',
+  params           TEXT,                          -- JSON
+  state            TEXT,                          -- JSON the runner needs to resume (e.g. batch ids)
+  summary          TEXT,                          -- JSON result
+  error            TEXT,
+  created_by       TEXT, created_at TEXT, started_at TEXT, finished_at TEXT,
+  progress_done    INTEGER DEFAULT 0, progress_total INTEGER DEFAULT 0,
+  cancel_requested INTEGER DEFAULT 0,
+  input_tokens     INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS job_events (
+  id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id), ts TEXT, level TEXT, message TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_job_events ON job_events(job_id, id);
+
+-- Edited copies of the scoring skill (SKILL.md, rubric, agents). The files in the repo are the default.
+CREATE TABLE IF NOT EXISTS skill_versions (
+  hash TEXT PRIMARY KEY, created_at TEXT, created_by TEXT, note TEXT, files TEXT   -- files: JSON {name: text}
+);
+
 -- Latest evaluation for the PR's current code under the current rubric
 CREATE VIEW IF NOT EXISTS v_pr AS
 SELECT p.*, r.full_name AS repo, u.login AS author_login,
        e.commit_msg, e.code_quality, e.validation, e.review_response, e.overall, e.tests_added,
        e.commit_notes, e.validation_notes, e.code_issues, e.summary, e.talking_points, e.evaluated_at,
-       e.rubric_version, e.engine
+       e.rubric_version, e.engine, e.model, e.agent, e.skill_hash, e.cost_usd
 FROM pull_requests p
 JOIN repos r ON r.id = p.repo_id
 LEFT JOIN users u ON u.uid = p.author_uid
