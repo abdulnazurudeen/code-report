@@ -653,3 +653,119 @@ def redact_pr_for_self(db, p, uid, access):
     # issues traced to someone else's commits stay visible only without their name being scored
     p["redacted"] = False
     return p
+
+
+# ---------------------------------------------------------------- team overview (charts on the dashboard home)
+DIMS = ("commit_msg", "code_quality", "validation", "review_response")
+SIZE_BUCKETS = (("Under 50", 0, 50), ("50-200", 50, 200), ("200-500", 200, 500), ("500-1000", 500, 1000), ("1000+", 1000, 10**9))
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def _period_prs(db, since, until, repo):
+    w, a = _window(since, until, repo, "COALESCE(p.activity_at, p.created_at)", "p.repo")
+    return rows(db.execute(f"""SELECT p.id, p.repo, p.number, p.title, p.url, p.state, p.author_uid, COALESCE(u.login,u.name) author,
+        p.additions, p.deletions, p.changed_files, p.ci_status, p.created_at, p.merged_at, COALESCE(p.activity_at,p.created_at) activity_at,
+        p.commit_msg, p.code_quality, p.validation, p.review_response, p.overall, p.tests_added, p.code_issues, p.engine, p.cost_usd,
+        (SELECT count(*) FROM rework_links rl WHERE rl.original_pr=p.id AND rl.confirmed=1) reworked
+        FROM v_pr p JOIN users u ON u.uid=p.author_uid
+        WHERE u.is_bot=0 AND COALESCE(p.kind,'change')='change' {w}""", a))
+
+
+def _issues(p):
+    try:
+        return json.loads(p["code_issues"] or "[]")
+    except ValueError:
+        return []
+
+
+def _kpis(prs):
+    ev = [p for p in prs if p["overall"] is not None]
+    issues = [i for p in ev for i in _issues(p)]
+    return {"prs": len(prs), "evaluated": len(ev), "merged": sum(p["state"] == "merged" for p in prs),
+            "open": sum(p["state"] == "open" for p in prs), "closed": sum(p["state"] == "closed" for p in prs),
+            "overall": _avg(p["overall"] for p in ev), **{d: _avg(p[d] for p in ev) for d in DIMS},
+            "avg_lines": round(sum((p["additions"] or 0) + (p["deletions"] or 0) for p in prs) / len(prs)) if prs else None,
+            "tests_pct": round(100 * sum(1 for p in ev if p["tests_added"]) / len(ev)) if ev else None,
+            "ci_fail_pct": round(100 * sum(p["ci_status"] in ("FAILURE", "ERROR") for p in prs) / len(prs)) if prs else None,
+            "blockers": sum(i.get("severity") == "blocker" for i in issues), "majors": sum(i.get("severity") == "major" for i in issues),
+            "reworked": sum(1 for p in prs if p["reworked"]), "people": len({p["author_uid"] for p in prs})}
+
+
+def overview(db, since, until, repo=None):
+    """Everything the dashboard home needs in one call: KPIs (with the previous period for comparison), score
+    distribution, monthly trend, projects, issue severity, review-comment outcomes, PR size vs score, who is doing
+    well / needs coaching, reviewer quality and the PRs that need attention."""
+    prs = _period_prs(db, since, until, repo)
+    ev = [p for p in prs if p["overall"] is not None]
+    out = {"period": {"since": since, "until": until}, "kpis": _kpis(prs), "previous": None}
+    try:                                                    # same-length period just before this one
+        d1, d2 = datetime.date.fromisoformat(since), datetime.date.fromisoformat(until)
+        if since > "1900" and until < "9000":
+            pu = d1 - datetime.timedelta(days=1)
+            ps = pu - (d2 - d1)
+            out["previous"] = _kpis(_period_prs(db, ps.isoformat(), pu.isoformat(), repo))
+            out["previous"]["since"], out["previous"]["until"] = ps.isoformat(), pu.isoformat()
+    except ValueError:
+        pass
+    out["distribution"] = [{"label": lbl, "count": sum(1 for p in ev if lo <= p["overall"] < hi + (0.0001 if hi == 5 else 0))}
+                           for lbl, lo, hi in (("1-2", 1, 2), ("2-3", 2, 3), ("3-4", 3, 4), ("4-5", 4, 5))]
+    months = {}
+    for p in prs:
+        months.setdefault(p["activity_at"][:7], []).append(p)
+    out["trend"] = [{"month": k, "prs": len(v), "evaluated": sum(1 for p in v if p["overall"] is not None), "overall": _avg(p["overall"] for p in v),
+                     **{d: _avg(p[d] for p in v) for d in DIMS}} for k, v in sorted(months.items())]
+    projects = {}
+    for p in prs:
+        projects.setdefault(p["repo"], []).append(p)
+    out["projects"] = sorted(({"repo": r, "prs": len(v), "evaluated": sum(1 for p in v if p["overall"] is not None), "overall": _avg(p["overall"] for p in v),
+                               "people": len({p["author_uid"] for p in v}), "blockers": sum(i.get("severity") == "blocker" for p in v for i in _issues(p)),
+                               "reworked": sum(1 for p in v if p["reworked"])} for r, v in projects.items()), key=lambda d: -d["prs"])
+    sev = {"blocker": 0, "major": 0, "minor": 0, "nit": 0}
+    for p in ev:
+        for i in _issues(p):
+            sev[i.get("severity")] = sev.get(i.get("severity"), 0) + 1
+    out["severity"] = sev
+    size = lambda p: (p["additions"] or 0) + (p["deletions"] or 0)
+    out["sizes"] = [{"label": lbl, "prs": sum(1 for p in prs if lo <= size(p) < hi),
+                     "overall": _avg(p["overall"] for p in prs if lo <= size(p) < hi)} for lbl, lo, hi in SIZE_BUCKETS]
+    w2, a2 = _window(since, until, repo)
+    th = {"valid": 0, "nitpick": 0, "invalid": 0, "fixed_in_code": 0, "explained": 0, "dismissed": 0, "open": 0}
+    for r in db.execute(f"""SELECT te.validity v, te.resolution x, count(*) n FROM thread_evaluations te
+          JOIN pull_requests p ON p.id=te.pr_id AND p.head_sha=te.head_sha JOIN repos r ON r.id=p.repo_id
+          WHERE te.rubric_version='{RUBRIC_VERSION}' {w2} GROUP BY te.validity, te.resolution""", a2):
+        th[r["v"]] = th.get(r["v"], 0) + r["n"]
+        if r["v"] == "valid":                               # how the *valid* comments ended up
+            th[r["x"]] = th.get(r["x"], 0) + r["n"]
+    out["threads"] = th
+    out["reviewers"] = rows(db.execute(f"""SELECT COALESCE(u.login,u.name) name, re.reviewer_uid uid, round(avg(re.score),2) avg, count(*) n
+          FROM reviewer_evaluations re JOIN pull_requests p ON p.id=re.pr_id AND p.head_sha=re.head_sha
+          JOIN repos r ON r.id=p.repo_id JOIN users u ON u.uid=re.reviewer_uid
+          WHERE re.rubric_version='{RUBRIC_VERSION}' AND u.is_bot=0 {w2} GROUP BY re.reviewer_uid HAVING count(*) >= 2
+          ORDER BY avg DESC, n DESC LIMIT 8""", a2))
+    people = team(db, since, until, repo)
+    scored = [t for t in people if t.get("overall") is not None and (t.get("evaluated") or 0) >= 2]
+    slim = lambda t: {"uid": t["uid"], "name": t.get("login") or t.get("name") or t["uid"], "overall": t["overall"], "prs": t.get("prs") or 0,
+                      "evaluated": t.get("evaluated") or 0, **{d: t.get(d) for d in DIMS}}
+    out["top"] = [slim(t) for t in sorted(scored, key=lambda t: (-t["overall"], -(t.get("evaluated") or 0)))[:5]]
+    out["coaching"] = [slim(t) for t in sorted(scored, key=lambda t: (t["overall"], -(t.get("evaluated") or 0)))[:5]]
+    out["extras"] = {"direct_pushes": sum(t.get("direct_pushes") or 0 for t in people), "ignored_comments": sum(t.get("ignored_comments") or 0 for t in people),
+                     "reviews_given": sum(t.get("reviews_given") or 0 for t in people)}
+    attn = []
+    for p in ev:
+        iss = _issues(p)
+        blockers = [i for i in iss if i.get("severity") == "blocker"]
+        if p["overall"] <= 2.75 or blockers:
+            top = (blockers or [i for i in iss if i.get("severity") == "major"] or iss or [{}])[0]
+            attn.append({"id": p["id"], "repo": p["repo"], "number": p["number"], "title": p["title"], "author": p["author"], "overall": p["overall"],
+                         "state": p["state"], "blockers": len(blockers), "issue": top.get("issue"), "file": top.get("file")})
+    out["attention"] = sorted(attn, key=lambda a: (-a["blockers"], a["overall"]))[:12]
+    out["engines"] = {}
+    for p in ev:
+        e = p["engine"] or "claude-code"
+        out["engines"][e] = out["engines"].get(e, 0) + 1
+    out["cost_usd"] = round(sum(p["cost_usd"] or 0 for p in ev), 2)
+    return out

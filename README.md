@@ -47,8 +47,8 @@ The app never shows these keys; the **Access** tab only says *set* or *not set*.
 |---|---|
 | **Top bar** | Period (1 / 3 / 6 / 12 months, all, custom) and project filter. Numbers update instantly. |
 | **Left list** | Every person found in the repos, with PR count and overall score. |
-| **Team overview** | One row per person: scores per area, reworked PRs, ignored review comments, direct pushes, reviews given. Click a column to sort, a row to open the person. |
-| **Person page** | Overall score, score per area, monthly trend, projects, tabs for **Pull requests**, **As reviewer**, **Direct pushes**. |
+| **Overview** | The home page. A team score ring and ten headline numbers (PRs, blockers, tests, rework, PR size, direct pushes...) each compared with the previous period; quality over time; score by area (radar); how scores are spread; issues by severity; what happened to review comments; projects and PR size against score; who is doing well and who could use coaching; reviewer quality; the PRs that need attention; and a colour-coded scorecard of every person. Click a project, person or PR to drill in. |
+| **Person page** | Score ring, rank, comparison with the team average, radar and bars by area (the line marks the team), monthly trend, projects, PR outcomes, issues by severity, and tabs for **Pull requests**, **As reviewer**, **Direct pushes**. |
 | **Click a PR** | 1:1 talking points, commit messages, code issues (and whether the reviewer caught them), the review conversation with each comment marked valid / nitpick / invalid and fixed / dismissed / open, and which model scored it. |
 | **Standards** | The rules every PR is scored against, shown as a readable page. |
 
@@ -148,7 +148,7 @@ The server refuses to listen on a network address if no sign-in method is config
 other committers' names but not their scores. Someone who is not matched gets an "access denied" page.
 
 **Office TV:** open the server's `/login`, enter the viewer password and keep *TV mode* ticked (or open `/?kiosk=1`;
-add `&rotate=20` to cycle through people every 20 seconds). It refreshes itself every 5 minutes and stays signed in for
+add `&rotate=20` to cycle the overview and each person every 20 seconds). It refreshes itself every 5 minutes and stays signed in for
 30 days. Everyone who knows the password sees all scores, so change it when someone leaves.
 
 ## 6. When something goes wrong
@@ -230,7 +230,7 @@ py audit.py status | people | pending | ingest | merge-users | --help
 | `control.py`, `store.py`, `schema.sql`, `github.py` | settings and jobs; database and dashboard queries; table layout; read-only GitHub client |
 | `skills/pr-scoring/` | the scoring skill: `SKILL.md`, `rubric.md`, `agents/`, `models.json` (model prices, default rules) |
 | `STANDARDS.md` | pointer to `skills/pr-scoring/rubric.md` |
-| `dashboard/` | `index.html`, `admin.js`, `login.html` |
+| `dashboard/` | `index.html` (pages), `charts.js` (SVG chart library), `admin.js` (admin screens), `login.html` |
 | `docs/github-oauth-setup.md` | creating the GitHub OAuth app |
 | `Dockerfile`, `docker-compose.yml`, `requirements-llm.txt` | hosting |
 | `tests/` | offline self-tests with fake GitHub, AI and sign-in: `py tests\app_test.py` |

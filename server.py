@@ -9,7 +9,7 @@ import store, control, auth, skill, routing, scoring, jobs
 
 HERE = Path(__file__).resolve().parent
 DASH = HERE / "dashboard"
-PAGES = {"/": "index.html", "/index.html": "index.html", "/admin.js": "admin.js", "/login": "login.html"}
+PAGES = {"/": "index.html", "/index.html": "index.html", "/admin.js": "admin.js", "/charts.js": "charts.js", "/login": "login.html"}
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 MAX_BODY = 1_500_000
@@ -321,6 +321,10 @@ def serve(db_path, port, open_browser=False, host="127.0.0.1", readonly=False, p
                 if role == "self":
                     m.update({"repos": self_repos(db, uid), "engines": {}, "pending_eval": None, "last_run": None})
                 return self.send(200, m)
+            if first == "overview":
+                if role == "self":
+                    raise HttpError(403, "the team overview is for admins and viewers")
+                return self.send(200, store.overview(db, since, until, repo))
             if first == "team":
                 t = store.team(db, since, until, repo)
                 return self.send(200, [x for x in t if x["uid"] == uid] if role == "self" else t)

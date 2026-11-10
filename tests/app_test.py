@@ -528,4 +528,53 @@ if shutil.which("node"):
 else:
     print("(node not found: markdown renderer test skipped)")
 
+
+# ------------------------------------------------------------------ 5. overview analytics + chart library
+o = store.overview(db, SINCE, TODAY)
+k = o["kpis"]
+ok(k["prs"] == 10 and k["evaluated"] == 10 and k["merged"] + k["open"] + k["closed"] == 10, k)
+ok(all(1 <= k[d] <= 5 for d in store.DIMS) and 1 <= k["overall"] <= 5 and k["people"] >= 3, k)
+ok(sum(b["count"] for b in o["distribution"]) == k["evaluated"], o["distribution"])
+ok([m["month"] for m in o["trend"]] == sorted(m["month"] for m in o["trend"]) and sum(m["prs"] for m in o["trend"]) == 10, o["trend"])
+ok(sum(p["prs"] for p in o["projects"]) == 10 and {p["repo"] for p in o["projects"]} == {"gem3s/payments", "gem3s/orders"}, o["projects"])
+ok(set(o["severity"]) >= {"blocker", "major", "minor", "nit"} and sum(b["prs"] for b in o["sizes"]) == 10, o["severity"])
+ok(o["previous"] and o["previous"]["since"] < SINCE and o["previous"]["until"] < SINCE, "previous period is the one just before")
+ok(store.overview(db, "0000-01-01", "9999-12-31")["previous"] is None, "no previous period for all time")
+ok(all({"id", "repo", "number", "overall", "blockers"} <= set(a) for a in o["attention"]) and o["attention"] == sorted(o["attention"], key=lambda a: (-a["blockers"], a["overall"])), "attention list")
+ok(store.overview(db, "2001-01-01", "2001-02-01")["kpis"]["prs"] == 0, "empty period does not break")
+ok(store.overview(db, SINCE, TODAY, "gem3s/orders")["kpis"]["prs"] == sum(p["prs"] for p in o["projects"] if p["repo"] == "gem3s/orders"), "repo filter")
+st, d, _ = call("GET", f"/api/overview?since={SINCE}&until={TODAY}", cookie=VIEWER)
+ok(st == 200 and d["kpis"]["prs"] == 10 and "attention" in d, "viewer sees the overview")
+ok(call("GET", f"/api/overview?since={SINCE}&until={TODAY}", cookie=ASHA)[0] == 403, "self cannot see the team overview")
+ok(call("GET", "/api/overview")[0] == 401, "not signed in")
+ok(call("GET", "/charts.js", cookie=ASHA)[0] == 200, "chart library is served")
+
+if shutil.which("node"):
+    code = (WORK / "dashboard" / "charts.js").read_text(encoding="utf-8")
+    probe = ("const Charts = (new Function(" + json.dumps(code + "; return Charts;") + "))();\n" + r'''
+const out = [];
+const months = [{month: "2026-08", prs: 12, evaluated: 10, overall: 2.9}, {month: "2026-09", prs: 30, evaluated: 25, overall: 3.4}, {month: "2026-10", prs: 5, evaluated: 0, overall: null}];
+out.push(Charts.gauge(3.2), Charts.gauge(null), Charts.donut([{label: "a<script>", value: 3, color: "red"}, {label: "b", value: 0, color: "blue"}], {center: "3"}), Charts.donut([], {}),
+  Charts.stack([{label: "x", value: 5, color: "red"}, {label: "y", value: 15, color: "blue"}]), Charts.stack([]),
+  Charts.hbars([{label: "<img src=x onerror=1>", value: 3, text: "3.0", key: "k"}, {label: "b", value: 0, text: "0"}]), Charts.hbars([]),
+  Charts.columns([{label: "1-2", value: 4, color: "red"}, {label: "2-3", value: 0}]), Charts.columns([]),
+  Charts.trend(months), Charts.trend([]), Charts.trend([{month: "2026-08", prs: 1, overall: null}]),
+  Charts.radar(["A", "B", "C", "D"], [{name: "me", values: [3, 4, null, 2], color: "red"}, {name: "team", values: [3, 3, 3, 3], color: "gray", dash: 1}]),
+  Charts.spark([1, 3, null, 4]), Charts.spark([3]), Charts.delta(3.4, 3.0), Charts.delta(3, 3), Charts.delta(null, 3), Charts.delta(1, 2, {better: "down"}),
+  Charts.kpi("5", "PRs", {sub: "x", delta: Charts.delta(5, 4, {digits: 0})}), Charts.heat(3.3), Charts.heat(null), Charts.mlabel("2026-11"));
+const all = out.join("\n");
+const bad = [];
+if (/NaN|undefined|Infinity/.test(all)) bad.push("NaN/undefined/Infinity in output");
+if (/<script|<img src=x/.test(all)) bad.push("unescaped markup");
+if (Charts.col(2.96) !== "var(--ok)" || Charts.col(2.94) !== "var(--bad)" || Charts.col(null) !== "var(--border)") bad.push("colour rounding");
+if (!Charts.delta(3.4, 3.0).includes("up") || !Charts.delta(1, 2, {better: "down"}).includes("up") || !Charts.delta(5, 3, {better: "down"}).includes("down")) bad.push("delta direction");
+if (Charts.mlabel("2026-11") !== "Nov '26") bad.push("month label " + Charts.mlabel("2026-11"));
+if ((Charts.donut([{label: "a", value: 3, color: "red"}], {}).match(/<circle/g) || []).length !== 2) bad.push("donut arcs");
+process.stdout.write(JSON.stringify({bad, n: out.length}));
+''')
+    r = subprocess.run(["node", "-e", probe], capture_output=True, timeout=30)
+    ok(r.returncode == 0, r.stderr.decode(errors="replace"))
+    res = json.loads(r.stdout.decode())
+    ok(res["bad"] == [] and res["n"] >= 20, res)
+
 print("\nAPP CHECKS PASSED")
